@@ -24,7 +24,9 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState.COMPLETE;
 
@@ -58,7 +60,7 @@ public class BlockUnderConstructionFeature {
   /**
    * The block source to use in the event of copy-on-write truncate.
    */
-  private Block truncateBlock;
+  private BlockInfo truncateBlock;
 
   public BlockUnderConstructionFeature(Block blk,
       BlockUCState state, DatanodeStorageInfo[] targets, BlockType blockType) {
@@ -107,6 +109,29 @@ public class BlockUnderConstructionFeature {
       storages[i] = replicas[i].getExpectedStorageLocation();
     }
     return storages;
+  }
+
+  /**
+   * Note that this iterator doesn't guarantee thread-safe. It depends on
+   * external mechanisms such as the FSNamesystem lock for protection.
+   */
+  public Iterator<DatanodeStorageInfo> getExpectedStorageLocationsIterator() {
+    return new Iterator<DatanodeStorageInfo>() {
+      private int index = 0;
+
+      @Override
+      public boolean hasNext() {
+        return index <  replicas.length;
+      }
+
+      @Override
+      public DatanodeStorageInfo next() {
+        if (!hasNext()) {
+          throw new NoSuchElementException();
+        }
+        return replicas[index++].getExpectedStorageLocation();
+      }
+    };
   }
 
   /**
@@ -168,11 +193,11 @@ public class BlockUnderConstructionFeature {
   }
 
   /** Get recover block */
-  public Block getTruncateBlock() {
+  public BlockInfo getTruncateBlock() {
     return truncateBlock;
   }
 
-  public void setTruncateBlock(Block recoveryBlock) {
+  public void setTruncateBlock(BlockInfo recoveryBlock) {
     this.truncateBlock = recoveryBlock;
   }
 
@@ -198,10 +223,17 @@ public class BlockUnderConstructionFeature {
    * Initialize lease recovery for this block.
    * Find the first alive data-node starting from the previous primary and
    * make it primary.
+   * @param blockInfo Block to be recovered
+   * @param recoveryId Recovery ID (new gen stamp)
+   * @param startRecovery Issue recovery command to datanode if true.
    */
-  public void initializeBlockRecovery(BlockInfo blockInfo, long recoveryId) {
+  public void initializeBlockRecovery(BlockInfo blockInfo, long recoveryId,
+      boolean startRecovery) {
     setBlockUCState(BlockUCState.UNDER_RECOVERY);
     blockRecoveryId = recoveryId;
+    if (!startRecovery) {
+      return;
+    }
     if (replicas.length == 0) {
       NameNode.blockStateChangeLog.warn("BLOCK*" +
           " BlockUnderConstructionFeature.initializeBlockRecovery:" +

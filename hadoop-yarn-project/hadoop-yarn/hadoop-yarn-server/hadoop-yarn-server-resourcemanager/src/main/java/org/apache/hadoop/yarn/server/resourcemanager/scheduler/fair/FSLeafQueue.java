@@ -21,23 +21,25 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.TreeSet;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
-import org.apache.hadoop.yarn.server.resourcemanager.resource.ResourceWeights;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
@@ -49,15 +51,17 @@ import static org.apache.hadoop.yarn.util.resource.Resources.none;
 @Private
 @Unstable
 public class FSLeafQueue extends FSQueue {
-  private static final Log LOG = LogFactory.getLog(FSLeafQueue.class.getName());
+  private static final Logger LOG = LoggerFactory.
+      getLogger(FSLeafQueue.class.getName());
   private static final List<FSQueue> EMPTY_LIST = Collections.emptyList();
 
-  private FairScheduler scheduler;
   private FSContext context;
 
   // apps that are runnable
   private final List<FSAppAttempt> runnableApps = new ArrayList<>();
   private final List<FSAppAttempt> nonRunnableApps = new ArrayList<>();
+  // assignedApps keeps track of applications that have no appAttempts
+  private final Set<ApplicationId> assignedApps = new HashSet<>();
   // get a lock with fair distribution for app list updates
   private final ReadWriteLock rwl = new ReentrantReadWriteLock(true);
   private final Lock readLock = rwl.readLock();
@@ -76,7 +80,6 @@ public class FSLeafQueue extends FSQueue {
   public FSLeafQueue(String name, FairScheduler scheduler,
       FSParentQueue parent) {
     super(name, scheduler, parent);
-    this.scheduler = scheduler;
     this.context = scheduler.getContext();
     this.lastTimeAtMinShare = scheduler.getClock().getTime();
     activeUsersManager = new ActiveUsersManager(getMetrics());
@@ -92,16 +95,10 @@ public class FSLeafQueue extends FSQueue {
       } else {
         nonRunnableApps.add(app);
       }
-    } finally {
-      writeLock.unlock();
-    }
-  }
-  
-  // for testing
-  void addAppSchedulable(FSAppAttempt appSched) {
-    writeLock.lock();
-    try {
-      runnableApps.add(appSched);
+      // when an appAttempt is created for an application, we'd like to move
+      // it over from assignedApps to either runnableApps or nonRunnableApps
+      assignedApps.remove(app.getApplicationId());
+      incUsedResource(app.getResourceUsage());
     } finally {
       writeLock.unlock();
     }
@@ -136,6 +133,7 @@ public class FSLeafQueue extends FSQueue {
       getMetrics().setAMResourceUsage(amResourceUsage);
     }
 
+    decUsedResource(app.getResourceUsage());
     return runnable;
   }
 
@@ -198,24 +196,69 @@ public class FSLeafQueue extends FSQueue {
   }
 
   @Override
-  public void setPolicy(SchedulingPolicy policy)
-      throws AllocationConfigurationException {
-    if (!SchedulingPolicy.isApplicableTo(policy, SchedulingPolicy.DEPTH_LEAF)) {
-      throwPolicyDoesnotApplyException(policy);
-    }
-    super.policy = policy;
-  }
-
-  @Override
-  public void updateInternal(boolean checkStarvation) {
+  void updateInternal() {
     readLock.lock();
     try {
       policy.computeShares(runnableApps, getFairShare());
-      if (checkStarvation) {
-        updateStarvedApps();
-      }
     } finally {
       readLock.unlock();
+    }
+  }
+
+  /**
+   * Compute the extent of fairshare starvation for a set of apps.
+   *
+   * @param appsWithDemand apps to compute fairshare starvation for
+   * @return aggregate fairshare starvation for all apps
+   */
+  private Resource updateStarvedAppsFairshare(
+      TreeSet<FSAppAttempt> appsWithDemand) {
+    Resource fairShareStarvation = Resources.clone(none());
+    // Fetch apps with unmet demand sorted by fairshare starvation
+    for (FSAppAttempt app : appsWithDemand) {
+      Resource appStarvation = app.fairShareStarvation();
+      if (!Resources.isNone(appStarvation))  {
+        context.getStarvedApps().addStarvedApp(app);
+        Resources.addTo(fairShareStarvation, appStarvation);
+      } else {
+        break;
+      }
+    }
+    return fairShareStarvation;
+  }
+
+  /**
+   * Distribute minshare starvation to a set of apps
+   * @param appsWithDemand set of apps
+   * @param minShareStarvation minshare starvation to distribute
+   */
+  private void updateStarvedAppsMinshare(
+      final TreeSet<FSAppAttempt> appsWithDemand,
+      final Resource minShareStarvation) {
+    Resource pending = Resources.clone(minShareStarvation);
+
+    // Keep adding apps to the starved list until the unmet demand goes over
+    // the remaining minshare
+    for (FSAppAttempt app : appsWithDemand) {
+      if (!Resources.isNone(pending)) {
+        Resource appMinShare = app.getPendingDemand();
+        Resources.subtractFromNonNegative(
+            appMinShare, app.getFairshareStarvation());
+
+        if (Resources.greaterThan(policy.getResourceCalculator(),
+            scheduler.getClusterResource(), appMinShare, pending)) {
+          Resources.subtractFromNonNegative(appMinShare, pending);
+          pending = none();
+        } else {
+          Resources.subtractFromNonNegative(pending, appMinShare);
+        }
+        app.setMinshareStarvation(appMinShare);
+        context.getStarvedApps().addStarvedApp(app);
+      } else {
+        // Reset minshare starvation in case we had set it in a previous
+        // iteration
+        app.resetMinshareStarvation();
+      }
     }
   }
 
@@ -235,68 +278,29 @@ public class FSLeafQueue extends FSQueue {
    * If this queue is starving due to fairshare, there must be at least
    * one application that is starved. And, even if the queue is not
    * starved due to fairshare, there might still be starved applications.
+   *
+   * Caller does not need read/write lock on the leaf queue.
    */
-  private void updateStarvedApps() {
-    // First identify starved applications and track total amount of
-    // starvation (in resources)
-    Resource fairShareStarvation = Resources.clone(none());
+  void updateStarvedApps() {
+    // Fetch apps with pending demand
+    TreeSet<FSAppAttempt> appsWithDemand = fetchAppsWithDemand(false);
 
-    // Fetch apps with unmet demand sorted by fairshare starvation
-    TreeSet<FSAppAttempt> appsWithDemand = fetchAppsWithDemand();
-    for (FSAppAttempt app : appsWithDemand) {
-      Resource appStarvation = app.fairShareStarvation();
-      if (!Resources.equals(Resources.none(), appStarvation))  {
-        context.getStarvedApps().addStarvedApp(app);
-        Resources.addTo(fairShareStarvation, appStarvation);
-      } else {
-        break;
-      }
-    }
+    // Process apps with fairshare starvation
+    Resource fairShareStarvation = updateStarvedAppsFairshare(appsWithDemand);
 
     // Compute extent of minshare starvation
     Resource minShareStarvation = minShareStarvation();
 
     // Compute minshare starvation that is not subsumed by fairshare starvation
-    Resources.subtractFrom(minShareStarvation, fairShareStarvation);
+    Resources.subtractFromNonNegative(minShareStarvation, fairShareStarvation);
 
-    // Keep adding apps to the starved list until the unmet demand goes over
-    // the remaining minshare
-    for (FSAppAttempt app : appsWithDemand) {
-      if (Resources.greaterThan(policy.getResourceCalculator(),
-          scheduler.getClusterResource(), minShareStarvation, none())) {
-        Resource appPendingDemand =
-            Resources.subtract(app.getDemand(), app.getResourceUsage());
-        Resources.subtractFrom(minShareStarvation, appPendingDemand);
-        app.setMinshareStarvation(appPendingDemand);
-        context.getStarvedApps().addStarvedApp(app);
-      } else {
-        // Reset minshare starvation in case we had set it in a previous
-        // iteration
-        app.resetMinshareStarvation();
-      }
-    }
+    // Assign this minshare to apps with pending demand over fairshare
+    updateStarvedAppsMinshare(appsWithDemand, minShareStarvation);
   }
 
   @Override
   public Resource getDemand() {
     return demand;
-  }
-
-  @Override
-  public Resource getResourceUsage() {
-    Resource usage = Resources.createResource(0);
-    readLock.lock();
-    try {
-      for (FSAppAttempt app : runnableApps) {
-        Resources.addTo(usage, app.getResourceUsage());
-      }
-      for (FSAppAttempt app : nonRunnableApps) {
-        Resources.addTo(usage, app.getResourceUsage());
-      }
-    } finally {
-      readLock.unlock();
-    }
-    return usage;
   }
 
   Resource getAmResourceUsage() {
@@ -307,37 +311,28 @@ public class FSLeafQueue extends FSQueue {
   public void updateDemand() {
     // Compute demand by iterating through apps in the queue
     // Limit demand to maxResources
-    demand = Resources.createResource(0);
+    Resource tmpDemand = Resources.createResource(0);
     readLock.lock();
     try {
       for (FSAppAttempt sched : runnableApps) {
-        updateDemandForApp(sched);
+        sched.updateDemand();
+        Resources.addTo(tmpDemand, sched.getDemand());
       }
       for (FSAppAttempt sched : nonRunnableApps) {
-        updateDemandForApp(sched);
+        sched.updateDemand();
+        Resources.addTo(tmpDemand, sched.getDemand());
       }
     } finally {
       readLock.unlock();
     }
     // Cap demand to maxShare to limit allocation to maxShare
-    demand = Resources.componentwiseMin(demand, maxShare);
+    demand = Resources.componentwiseMin(tmpDemand, getMaxShare());
     if (LOG.isDebugEnabled()) {
       LOG.debug("The updated demand for " + getName() + " is " + demand
-          + "; the max is " + maxShare);
+          + "; the max is " + getMaxShare());
       LOG.debug("The updated fairshare for " + getName() + " is "
           + getFairShare());
     }
-  }
-  
-  private void updateDemandForApp(FSAppAttempt sched) {
-    sched.updateDemand();
-    Resource toAdd = sched.getDemand();
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Counting resource from " + sched.getName() + " " + toAdd
-          + "; Total resource demand for " + getName() + " now "
-          + demand);
-    }
-    demand = Resources.add(demand, toAdd);
   }
 
   @Override
@@ -352,30 +347,37 @@ public class FSLeafQueue extends FSQueue {
       return assigned;
     }
 
-    for (FSAppAttempt sched : fetchAppsWithDemand()) {
+    for (FSAppAttempt sched : fetchAppsWithDemand(true)) {
       if (SchedulerAppUtils.isPlaceBlacklisted(sched, node, LOG)) {
         continue;
       }
       assigned = sched.assignContainer(node);
       if (!assigned.equals(none())) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Assigned container in queue:" + getName() + " " +
-              "container:" + assigned);
-        }
+        LOG.debug("Assigned container in queue:{} container:{}",
+            getName(), assigned);
         break;
       }
     }
     return assigned;
   }
 
-  private TreeSet<FSAppAttempt> fetchAppsWithDemand() {
+  /**
+   * Fetch the subset of apps that have unmet demand. When used for
+   * preemption-related code (as opposed to allocation), omits apps that
+   * should not be checked for starvation.
+   *
+   * @param assignment whether the apps are for allocation containers, as
+   *                   opposed to preemption calculations
+   * @return Set of apps with unmet demand
+   */
+  private TreeSet<FSAppAttempt> fetchAppsWithDemand(boolean assignment) {
     TreeSet<FSAppAttempt> pendingForResourceApps =
         new TreeSet<>(policy.getComparator());
     readLock.lock();
     try {
       for (FSAppAttempt app : runnableApps) {
-        Resource pending = app.getAppAttemptResourceUsage().getPending();
-        if (!pending.equals(none())) {
+        if (!Resources.isNone(app.getPendingDemand()) &&
+            (assignment || app.shouldCheckForStarvation())) {
           pendingForResourceApps.add(app);
         }
       }
@@ -445,6 +447,29 @@ public class FSLeafQueue extends FSQueue {
     return numPendingApps;
   }
 
+  public int getNumAssignedApps() {
+    readLock.lock();
+    try {
+      return assignedApps.size();
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  @Override
+  public boolean isEmpty() {
+    readLock.lock();
+    try {
+      if (runnableApps.size() > 0 || nonRunnableApps.size() > 0 ||
+          assignedApps.size() > 0) {
+        return false;
+      }
+    } finally {
+      readLock.unlock();
+    }
+    return true;
+  }
+
   /**
    * TODO: Based on how frequently this is called, we might want to club
    * counting pending and active apps in the same method.
@@ -465,7 +490,7 @@ public class FSLeafQueue extends FSQueue {
   }
 
   @Override
-  public ActiveUsersManager getActiveUsersManager() {
+  public ActiveUsersManager getAbstractUsersManager() {
     return activeUsersManager;
   }
 
@@ -479,19 +504,25 @@ public class FSLeafQueue extends FSQueue {
   */
   private Resource computeMaxAMResource() {
     Resource maxResource = Resources.clone(getFairShare());
+    Resource maxShare = getMaxShare();
+
     if (maxResource.getMemorySize() == 0) {
       maxResource.setMemorySize(
           Math.min(scheduler.getRootQueueMetrics().getAvailableMB(),
-                   getMaxShare().getMemorySize()));
+                   maxShare.getMemorySize()));
     }
 
     if (maxResource.getVirtualCores() == 0) {
       maxResource.setVirtualCores(Math.min(
           scheduler.getRootQueueMetrics().getAvailableVirtualCores(),
-          getMaxShare().getVirtualCores()));
+          maxShare.getVirtualCores()));
     }
 
-    return Resources.multiply(maxResource, maxAMShare);
+    scheduler.getRootQueueMetrics()
+        .fillInValuesFromAvailableResources(maxShare, maxResource);
+
+    // Round up to allow AM to run when there is only one vcore on the cluster
+    return Resources.multiplyAndRoundUp(maxResource, maxAMShare);
   }
 
   /**
@@ -531,7 +562,17 @@ public class FSLeafQueue extends FSQueue {
    * @param weight queue weight
    */
   public void setWeights(float weight) {
-    this.weights = new ResourceWeights(weight);
+    this.weights = weight;
+  }
+
+  @Override
+  public Resource getMaximumContainerAllocation() {
+    if (maxContainerAllocation.equals(Resources.unbounded())
+        && getParent() != null) {
+      return getParent().getMaximumContainerAllocation();
+    } else {
+      return maxContainerAllocation;
+    }
   }
 
   /**
@@ -541,13 +582,14 @@ public class FSLeafQueue extends FSQueue {
    */
   private Resource minShareStarvation() {
     // If demand < minshare, we should use demand to determine starvation
-    Resource desiredShare = Resources.min(policy.getResourceCalculator(),
-        scheduler.getClusterResource(), getMinShare(), getDemand());
+    Resource starvation =
+        Resources.componentwiseMin(getMinShare(), getDemand());
 
-    Resource starvation = Resources.subtract(desiredShare, getResourceUsage());
+    Resources.subtractFromNonNegative(starvation, getResourceUsage());
+
     boolean starved = !Resources.isNone(starvation);
-
     long now = scheduler.getClock().getTime();
+
     if (!starved) {
       // Record that the queue is not starved
       setLastTimeAtMinShare(now);
@@ -591,5 +633,54 @@ public class FSLeafQueue extends FSQueue {
   @VisibleForTesting
   boolean isStarved() {
     return isStarvedForMinShare() || isStarvedForFairShare();
+  }
+
+  @Override
+  protected void dumpStateInternal(StringBuilder sb) {
+    sb.append("{Name: " + getName() +
+        ", Weight: " + weights +
+        ", Policy: " + policy.getName() +
+        ", FairShare: " + getFairShare() +
+        ", SteadyFairShare: " + getSteadyFairShare() +
+        ", MaxShare: " + getMaxShare() +
+        ", MinShare: " + minShare +
+        ", ResourceUsage: " + getResourceUsage() +
+        ", Demand: " + getDemand() +
+        ", Runnable: " + getNumRunnableApps() +
+        ", NumPendingApps: " + getNumPendingApps() +
+        ", NonRunnable: " + getNumNonRunnableApps() +
+        ", MaxAMShare: " + maxAMShare +
+        ", MaxAMResource: " + computeMaxAMResource() +
+        ", AMResourceUsage: " + getAmResourceUsage() +
+        ", LastTimeAtMinShare: " + lastTimeAtMinShare +
+        "}");
+  }
+
+  /**
+   * This method is called when an application is assigned to this queue
+   * for book-keeping purposes (to be able to determine if the queue is empty).
+   * @param applicationId the application's id
+   */
+  public void addAssignedApp(ApplicationId applicationId) {
+    writeLock.lock();
+    try {
+      assignedApps.add(applicationId);
+    } finally {
+      writeLock.unlock();
+    }
+  }
+
+  /**
+   * This method is called when an application is removed from this queue
+   * during the submit process.
+   * @param applicationId the application's id
+   */
+  public void removeAssignedApp(ApplicationId applicationId) {
+    writeLock.lock();
+    try {
+      assignedApps.remove(applicationId);
+    } finally {
+      writeLock.unlock();
+    }
   }
 }

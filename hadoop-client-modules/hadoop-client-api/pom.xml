@@ -13,16 +13,16 @@
  limitations under the License. See accompanying LICENSE file.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 <parent>
    <groupId>org.apache.hadoop</groupId>
    <artifactId>hadoop-project</artifactId>
-   <version>3.0.0-alpha3-SNAPSHOT</version>
+   <version>3.3.0-SNAPSHOT</version>
    <relativePath>../../hadoop-project</relativePath>
 </parent>
   <artifactId>hadoop-client-api</artifactId>
-  <version>3.0.0-alpha3-SNAPSHOT</version>
+  <version>3.3.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <description>Apache Hadoop Client</description>
@@ -182,9 +182,31 @@
                         <exclude>io/serializations</exclude>
                       </excludes>
                     </relocation>
+                    <!-- JSRs that haven't made it to inclusion in J2SE -->
+                    <relocation>
+                      <pattern>javax/el/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.el.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
+                      <pattern>javax/cache/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.cache.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
                     <relocation>
                       <pattern>javax/servlet/</pattern>
                       <shadedPattern>${shaded.dependency.prefix}.javax.servlet.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
+                      <pattern>javax/ws/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.ws.</shadedPattern>
                       <excludes>
                         <exclude>**/pom.xml</exclude>
                       </excludes>
@@ -199,13 +221,26 @@
                         <exclude>net/topology/**/*</exclude>
                       </excludes>
                     </relocation>
+                    <!-- okio declares a top level package instead of nested -->
+                    <relocation>
+                      <pattern>okio/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.okio.</shadedPattern>
+                    </relocation>
                   </relocations>
                   <transformers>
                     <!-- Needed until MSHADE-182 -->
                     <transformer implementation="org.apache.hadoop.maven.plugin.shade.resource.ServicesResourceTransformer"/>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
-                    <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer">
-                        <addHeader>false</addHeader>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.DontIncludeResourceTransformer">
+                      <resource>NOTICE.txt</resource>
+                    </transformer>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
+                      <resource>META-INF/LICENSE.txt</resource>
+                      <file>${basedir}/../../LICENSE.txt</file>
+                    </transformer>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
+                      <resource>META-INF/NOTICE.txt</resource>
+                      <file>${basedir}/../../NOTICE.txt</file>
                     </transformer>
                   </transformers>
                 </configuration>

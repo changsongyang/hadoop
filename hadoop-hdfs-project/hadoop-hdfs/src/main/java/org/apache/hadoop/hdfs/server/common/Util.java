@@ -22,9 +22,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -32,25 +34,31 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.server.namenode.ImageServlet;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.MD5Hash;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
 
 
 @InterfaceAudience.Private
 public final class Util {
-  private final static Log LOG = LogFactory.getLog(Util.class.getName());
+  private final static Logger LOG =
+      LoggerFactory.getLogger(Util.class.getName());
 
   public final static String FILE_LENGTH = "File-Length";
   public final static String CONTENT_LENGTH = "Content-Length";
@@ -89,8 +97,7 @@ public final class Util {
 
     // if URI is null or scheme is undefined, then assume it's file://
     if(u == null || u.getScheme() == null){
-      LOG.warn("Path " + s + " should be specified as a URI "
-          + "in configuration files. Please update hdfs configuration.");
+      LOG.info("Assuming 'file' scheme for path " + s + " in configuration.");
       u = fileAsURI(new File(s));
     }
     return u;
@@ -143,7 +150,8 @@ public final class Util {
    * storage.
    */
   public static MD5Hash doGetUrl(URL url, List<File> localPaths,
-      Storage dstStorage, boolean getChecksum, int timeout) throws IOException {
+      Storage dstStorage, boolean getChecksum, int timeout,
+      DataTransferThrottler throttler) throws IOException {
     HttpURLConnection connection;
     try {
       connection = (HttpURLConnection)
@@ -176,7 +184,7 @@ public final class Util {
 
     return receiveFile(url.toExternalForm(), localPaths, dstStorage,
         getChecksum, advertisedSize, advertisedDigest, fsImageName, stream,
-        null);
+        throttler);
   }
 
   /**
@@ -217,6 +225,7 @@ public final class Util {
       stream = new DigestInputStream(stream, digester);
     }
     boolean finishedReceiving = false;
+    int num = 1;
 
     List<FileOutputStream> outputStreams = Lists.newArrayList();
 
@@ -248,7 +257,6 @@ public final class Util {
         }
       }
 
-      int num = 1;
       byte[] buf = new byte[IO_FILE_BUFFER_SIZE];
       while (num > 0) {
         num = stream.read(buf);
@@ -268,7 +276,7 @@ public final class Util {
       long xferKb = received / 1024;
       xferCombined += xferSec;
       xferStats.append(
-          String.format(" The fsimage download took %.2fs at %.2f KB/s.",
+          String.format(" The file download took %.2fs at %.2f KB/s.",
               xferSec, xferKb / xferSec));
     } finally {
       stream.close();
@@ -297,11 +305,11 @@ public final class Util {
         // exception that makes it look like a server-side problem!
         deleteTmpFiles(localPaths);
         throw new IOException("File " + url + " received length " + received +
-            " is not of the advertised size " +
-            advertisedSize);
+            " is not of the advertised size " + advertisedSize +
+            ". Fsimage name: " + fsImageName + " lastReceived: " + num);
       }
     }
-    xferStats.insert(0, String.format("Combined time for fsimage download and" +
+    xferStats.insert(0, String.format("Combined time for file download and" +
         " fsync to all disks took %.2fs.", xferCombined));
     LOG.info(xferStats.toString());
 
@@ -349,5 +357,52 @@ public final class Util {
   private static MD5Hash parseMD5Header(HttpURLConnection connection) {
     String header = connection.getHeaderField(MD5_HEADER);
     return (header != null) ? new MD5Hash(header) : null;
+  }
+
+  public static List<InetSocketAddress> getAddressesList(URI uri)
+      throws IOException{
+    String authority = uri.getAuthority();
+    Preconditions.checkArgument(authority != null && !authority.isEmpty(),
+        "URI has no authority: " + uri);
+
+    String[] parts = StringUtils.split(authority, ';');
+    for (int i = 0; i < parts.length; i++) {
+      parts[i] = parts[i].trim();
+    }
+
+    List<InetSocketAddress> addrs = Lists.newArrayList();
+    for (String addr : parts) {
+      InetSocketAddress isa = NetUtils.createSocketAddr(
+          addr, DFSConfigKeys.DFS_JOURNALNODE_RPC_PORT_DEFAULT);
+      if (isa.isUnresolved()) {
+        throw new UnknownHostException(addr);
+      }
+      addrs.add(isa);
+    }
+    return addrs;
+  }
+
+  public static List<InetSocketAddress> getLoggerAddresses(URI uri,
+      Set<InetSocketAddress> addrsToExclude) throws IOException {
+    List<InetSocketAddress> addrsList = getAddressesList(uri);
+    addrsList.removeAll(addrsToExclude);
+    return addrsList;
+  }
+
+  public static boolean isDiskStatsEnabled(int fileIOSamplingPercentage) {
+    final boolean isEnabled;
+    if (fileIOSamplingPercentage <= 0) {
+      LOG.info(DFSConfigKeys
+          .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_KEY + " set to "
+          + fileIOSamplingPercentage + ". Disabling file IO profiling");
+      isEnabled = false;
+    } else {
+      LOG.info(DFSConfigKeys
+          .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_KEY + " set to "
+          + fileIOSamplingPercentage + ". Enabling file IO profiling");
+      isEnabled = true;
+    }
+
+    return isEnabled;
   }
 }

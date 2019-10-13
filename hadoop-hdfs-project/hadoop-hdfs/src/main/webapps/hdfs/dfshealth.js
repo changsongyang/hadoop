@@ -37,6 +37,8 @@
       {"name": "nnstat",  "url": "/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus"},
       {"name": "fs",      "url": "/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState"},
       {"name": "fsn",     "url": "/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem"},
+      {"name": "replicastat",      "url": "/jmx?qry=Hadoop:service=NameNode,name=ReplicatedBlocksState"},
+      {"name": "ecstat",      "url": "/jmx?qry=Hadoop:service=NameNode,name=ECBlockGroupsState"},
       {"name": "blockstats",      "url": "/jmx?qry=Hadoop:service=NameNode,name=BlockStats"},
       {"name": "mem",     "url": "/jmx?qry=java.lang:type=Memory"}
     ];
@@ -172,7 +174,7 @@
         $('#tab-startup-progress').html(out);
         $('#ui-tabs a[href="#tab-startup-progress"]').tab('show');
       });
-    }).error(ajax_error_handler);
+    }).fail(ajax_error_handler);
   }
 
   function load_datanode_info() {
@@ -215,9 +217,9 @@
           var port = n.infoAddr.split(":")[1];
           var securePort = n.infoSecureAddr.split(":")[1];
           var dnHost = n.name.split(":")[0];
-          n.dnWebAddress = dnHost + ":" + port;
+          n.dnWebAddress = "http://" + dnHost + ":" + port;
           if (securePort != 0) {
-            n.dnWebAddress = dnHost + ":" + securePort;
+            n.dnWebAddress = "https://" + dnHost + ":" + securePort;
           }
 
           if (n.adminState === "In Service") {
@@ -255,6 +257,73 @@
       return r;
     }
 
+    function renderHistogram(dnData) {
+      var data = dnData.LiveNodes.map(function(dn) {
+        return (dn.usedSpace / dn.capacity) * 100.0;
+      });
+
+      var formatCount = d3.format(",.0f");
+
+      var widthCap = $("div.container").width();
+      var heightCap = 150;
+
+      var margin = {top: 10, right: 60, bottom: 30, left: 30},
+          width = widthCap * 0.9,
+          height = heightCap - margin.top - margin.bottom;
+
+      var x = d3.scaleLinear()
+          .domain([0.0, 100.0])
+          .range([0, width]);
+
+      var bins = d3.histogram()
+          .domain(x.domain())
+          .thresholds(x.ticks(20))
+          (data);
+
+      var y = d3.scaleLinear()
+          .domain([0, d3.max(bins, function(d) { return d.length; })])
+          .range([height, 0]);
+
+      var svg = d3.select("#datanode-usage-histogram").append("svg")
+          .attr("width", width + 50.0)
+          .attr("height", height + margin.top + margin.bottom)
+          .append("g")
+          .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+      svg.append("text")
+          .attr("x", (width / 2))
+          .attr("y", heightCap - 6 - (margin.top / 2))
+          .attr("text-anchor", "middle")
+          .style("font-size", "15px")
+          .text("Disk usage of each DataNode (%)");
+
+      var bar = svg.selectAll(".bar")
+          .data(bins)
+          .enter().append("g")
+          .attr("class", "bar")
+          .attr("transform", function(d) { return "translate(" + x(d.x0) + "," + y(d.length) + ")"; });
+
+      window.liveNodes = dnData.LiveNodes;
+
+      bar.append("rect")
+          .attr("x", 1)
+          .attr("width", x(bins[0].x1) - x(bins[0].x0) - 1)
+          .attr("height", function(d) { return height - y(d.length); })
+          .attr("onclick", function (d) { return "open_hostip_list(" + d.x0 + "," + d.x1 + ")"; });
+
+      bar.append("text")
+          .attr("dy", ".75em")
+          .attr("y", 6)
+          .attr("x", (x(bins[0].x1) - x(bins[0].x0)) / 2)
+          .attr("text-anchor", "middle")
+          .text(function(d) { return formatCount(d.length); });
+
+      svg.append("g")
+          .attr("class", "axis axis--x")
+          .attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(x));
+    }
+
     $.get(
       '/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo',
       guard_with_startup_progress(function (resp) {
@@ -264,18 +333,39 @@
           $('#tab-datanode').html(out);
           $('#table-datanodes').dataTable( {
             'lengthMenu': [ [25, 50, 100, -1], [25, 50, 100, "All"] ],
+            'columnDefs': [
+              { 'targets': [ 0 ], 'visible': false, 'searchable': false }
+             ],
             'columns': [
-              { 'orderDataType': 'ng-value', 'searchable': true },
-              { 'orderDataType': 'ng-value', 'searchable': true },
-              { 'orderDataType': 'ng-value', 'type': 'numeric' },
-              { 'orderDataType': 'ng-value', 'type': 'numeric' },
-              { 'orderData': 3, 'type': 'numeric' },
-              { 'orderDataType': 'ng-value', 'type': 'numeric'},
-              { 'orderData': 5 }
-            ]});
+              { 'orderDataType': 'ng-value', 'searchable': true , "defaultContent": "" },
+              { 'orderDataType': 'ng-value', 'searchable': true , "defaultContent": "" },
+              { 'orderDataType': 'ng-value', 'searchable': true , "defaultContent": ""},
+              { 'orderDataType': 'ng-value', 'type': 'num' , "defaultContent": 0},
+              { 'orderDataType': 'ng-value', 'type': 'num' , "defaultContent": 0},
+              { 'orderDataType': 'ng-value', 'type': 'num' , "defaultContent": 0},
+              { 'type': 'num' , "defaultContent": 0},
+              { 'orderDataType': 'ng-value', 'type': 'num' , "defaultContent": 0},
+              { 'type': 'string' , "defaultContent": ""}
+              ],
+              initComplete: function () {
+                var column = this.api().column([0]);
+                var select = $('<select class="datanodestatus form-control input-sm"><option value="">All</option></select>')
+                              .appendTo('#datanodefilter')
+                              .on('change', function () {
+                                var val = $.fn.dataTable.util.escapeRegex(
+                                $(this).val());
+                                column.search(val ? '^' + val + '$' : '', true, false).draw();
+                              });
+                console.log(select);
+                column.data().unique().sort().each(function (d, j) {
+                  select.append('<option value="' + d + '">' + d + '</option>');
+                });
+            }
+          });
+          renderHistogram(data);
           $('#ui-tabs a[href="#tab-datanode"]').tab('show');
         });
-      })).error(ajax_error_handler);
+      })).fail(ajax_error_handler);
   }
 
   function load_datanode_volume_failures() {
@@ -314,7 +404,7 @@
           $('#tab-datanode-volume-failures').html(out);
           $('#ui-tabs a[href="#tab-datanode-volume-failures"]').tab('show');
         });
-      })).error(ajax_error_handler);
+      })).fail(ajax_error_handler);
   }
 
   function load_snapshot_info() {
@@ -325,7 +415,7 @@
           $('#tab-snapshot').html(out);
           $('#ui-tabs a[href="#tab-snapshot"]').tab('show');
         });
-      })).error(ajax_error_handler);
+      })).fail(ajax_error_handler);
   }
 
   function load_page() {
@@ -357,3 +447,45 @@
     load_page();
   });
 })();
+
+function open_hostip_list(x0, x1) {
+  close_hostip_list();
+  var ips = new Array();
+  for (var i = 0; i < liveNodes.length; i++) {
+    var dn = liveNodes[i];
+    var index = (dn.usedSpace / dn.capacity) * 100.0;
+    if (index == 0) {
+      index = 1;
+    }
+    //More than 100% do not care,so not record in 95%-100% bar
+    if (index > x0 && index <= x1) {
+      ips.push(dn.infoAddr.split(":")[0]);
+    }
+  }
+  var ipsText = '';
+  for (var i = 0; i < ips.length; i++) {
+    ipsText += ips[i] + '\n';
+  }
+  var histogram_div = document.getElementById('datanode-usage-histogram');
+  histogram_div.setAttribute('style', 'position: relative');
+  var ips_div = document.createElement("textarea");
+  ips_div.setAttribute('id', 'datanode_ips');
+  ips_div.setAttribute('rows', '8');
+  ips_div.setAttribute('cols', '14');
+  ips_div.setAttribute('style', 'position: absolute;top: 0px;right: -38px;');
+  ips_div.setAttribute('readonly', 'readonly');
+  histogram_div.appendChild(ips_div);
+
+  var close_div = document.createElement("div");
+  histogram_div.appendChild(close_div);
+  close_div.setAttribute('id', 'close_ips');
+  close_div.setAttribute('style', 'position: absolute;top: 0px;right: -62px;width:20px;height;20px');
+  close_div.setAttribute('onclick', 'close_hostip_list()');
+  close_div.innerHTML = "X";
+  ips_div.innerHTML = ipsText;
+}
+
+function close_hostip_list() {
+  $("#datanode_ips").remove();
+  $("#close_ips").remove();
+}

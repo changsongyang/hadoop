@@ -75,6 +75,13 @@ public interface DataNodeMXBean {
   public String getNamenodeAddresses();
 
   /**
+   * Gets the datanode hostname.
+   *
+   * @return the datanode hostname for the datanode.
+   */
+  public String getDatanodeHostname();
+
+  /**
    * Gets information of the block pool service actors.
    *
    * @return block pool service actors info
@@ -132,4 +139,18 @@ public interface DataNodeMXBean {
    * </p>
    */
   String getSendPacketDownstreamAvgInfo();
+
+  /**
+   * Gets the slow disks in the Datanode.
+   *
+   * @return list of slow disks
+   */
+  String getSlowDisks();
+
+  /**
+   * Gets if security is enabled.
+   *
+   * @return true, if security is enabled.
+   */
+  boolean isSecurityEnabled();
 }

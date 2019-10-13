@@ -19,8 +19,9 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.distributed;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.yarn.api.records.NodeState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
@@ -47,7 +48,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class NodeQueueLoadMonitor implements ClusterMonitor {
 
-  final static Log LOG = LogFactory.getLog(NodeQueueLoadMonitor.class);
+  final static Logger LOG = LoggerFactory.
+      getLogger(NodeQueueLoadMonitor.class);
 
   /**
    * The comparator used to specify the metric against which the load
@@ -75,6 +77,7 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
     int queueWaitTime = -1;
     double timestamp;
     final NodeId nodeId;
+    private int queueCapacity = 0;
 
     public ClusterNode(NodeId nodeId) {
       this.nodeId = nodeId;
@@ -94,6 +97,16 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
     public ClusterNode updateTimestamp() {
       this.timestamp = System.currentTimeMillis();
       return this;
+    }
+
+    public ClusterNode setQueueCapacity(int capacity) {
+      this.queueCapacity = capacity;
+      return this;
+    }
+
+    public boolean isQueueFull() {
+      return this.queueCapacity > 0 &&
+          this.queueLength >= this.queueCapacity;
     }
   }
 
@@ -171,16 +184,15 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
   @Override
   public void addNode(List<NMContainerStatus> containerStatuses,
       RMNode rmNode) {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Node added event from: " + rmNode.getNode().getName());
-    }
+    LOG.debug("Node added event from: {}", rmNode.getNode().getName());
+
     // Ignoring this currently : at least one NODE_UPDATE heartbeat is
     // required to ensure node eligibility.
   }
 
   @Override
   public void removeNode(RMNode removedRMNode) {
-    LOG.debug("Node delete event for: " + removedRMNode.getNode().getName());
+    LOG.debug("Node delete event for: {}", removedRMNode.getNode().getName());
     ReentrantReadWriteLock.WriteLock writeLock = clusterNodesLock.writeLock();
     writeLock.lock();
     ClusterNode node;
@@ -200,9 +212,15 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
 
   @Override
   public void updateNode(RMNode rmNode) {
-    LOG.debug("Node update event from: " + rmNode.getNodeID());
+    LOG.debug("Node update event from: {}", rmNode.getNodeID());
     OpportunisticContainersStatus opportunisticContainersStatus =
         rmNode.getOpportunisticContainersStatus();
+    if (opportunisticContainersStatus == null) {
+      opportunisticContainersStatus =
+          OpportunisticContainersStatus.newInstance();
+    }
+    int opportQueueCapacity =
+        opportunisticContainersStatus.getOpportQueueCapacity();
     int estimatedQueueWaitTime =
         opportunisticContainersStatus.getEstimatedQueueWaitTime();
     int waitQueueLength = opportunisticContainersStatus.getWaitQueueLength();
@@ -213,12 +231,14 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
     try {
       ClusterNode currentNode = this.clusterNodes.get(rmNode.getNodeID());
       if (currentNode == null) {
-        if (estimatedQueueWaitTime != -1
-            || comparator == LoadComparator.QUEUE_LENGTH) {
+        if (rmNode.getState() != NodeState.DECOMMISSIONING &&
+            (estimatedQueueWaitTime != -1 ||
+                comparator == LoadComparator.QUEUE_LENGTH)) {
           this.clusterNodes.put(rmNode.getNodeID(),
               new ClusterNode(rmNode.getNodeID())
                   .setQueueWaitTime(estimatedQueueWaitTime)
-                  .setQueueLength(waitQueueLength));
+                  .setQueueLength(waitQueueLength)
+                  .setQueueCapacity(opportQueueCapacity));
           LOG.info("Inserting ClusterNode [" + rmNode.getNodeID() + "] " +
               "with queue wait time [" + estimatedQueueWaitTime + "] and " +
               "wait queue length [" + waitQueueLength + "]");
@@ -228,17 +248,17 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
               "wait queue length [" + waitQueueLength + "]");
         }
       } else {
-        if (estimatedQueueWaitTime != -1
-            || comparator == LoadComparator.QUEUE_LENGTH) {
+        if (rmNode.getState() != NodeState.DECOMMISSIONING &&
+            (estimatedQueueWaitTime != -1 ||
+                comparator == LoadComparator.QUEUE_LENGTH)) {
           currentNode
               .setQueueWaitTime(estimatedQueueWaitTime)
               .setQueueLength(waitQueueLength)
               .updateTimestamp();
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("Updating ClusterNode [" + rmNode.getNodeID() + "] " +
-                "with queue wait time [" + estimatedQueueWaitTime + "] and " +
-                "wait queue length [" + waitQueueLength + "]");
-          }
+          LOG.debug("Updating ClusterNode [{}] with queue wait time [{}] and"
+              + " wait queue length [{}]", rmNode.getNodeID(),
+              estimatedQueueWaitTime, waitQueueLength);
+
         } else {
           this.clusterNodes.remove(rmNode.getNodeID());
           LOG.info("Deleting ClusterNode [" + rmNode.getNodeID() + "] " +
@@ -253,7 +273,7 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
 
   @Override
   public void updateNodeResource(RMNode rmNode, ResourceOption resourceOption) {
-    LOG.debug("Node resource update event from: " + rmNode.getNodeID());
+    LOG.debug("Node resource update event from: {}", rmNode.getNodeID());
     // Ignoring this currently.
   }
 
@@ -297,7 +317,11 @@ public class NodeQueueLoadMonitor implements ClusterMonitor {
       // is what we ultimately care about.
       Arrays.sort(nodes, (Comparator)comparator);
       for (int j=0; j < nodes.length; j++) {
-        retList.add(((ClusterNode)nodes[j]).nodeId);
+        ClusterNode cNode = (ClusterNode)nodes[j];
+        // Exclude nodes whose queue is already full.
+        if (!cNode.isQueueFull()) {
+          retList.add(cNode.nodeId);
+        }
       }
       return retList;
     } finally {

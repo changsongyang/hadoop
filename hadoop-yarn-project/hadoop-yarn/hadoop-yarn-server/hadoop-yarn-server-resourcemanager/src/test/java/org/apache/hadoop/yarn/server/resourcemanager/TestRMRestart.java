@@ -18,9 +18,10 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.isA;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
@@ -43,8 +44,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
@@ -59,6 +61,7 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.service.Service.STATE;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportResponse;
@@ -67,6 +70,7 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.AllocateRequestPBImpl;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -75,8 +79,10 @@ import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
@@ -85,6 +91,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
+import org.apache.hadoop.yarn.server.api.protocolrecords.AddToClusterNodeLabelsRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.api.records.NodeAction;
@@ -95,6 +102,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreAMRMTokenEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreProxyCAEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreRMDTEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreRMDTMasterKeyEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationAttemptStateData;
@@ -105,21 +113,21 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.TestSchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.TestSchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.TestUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
+import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.timelineservice.collector.TimelineCollectorContext;
 import org.apache.hadoop.yarn.server.timelineservice.storage.FileSystemTimelineWriterImpl;
 import org.apache.hadoop.yarn.server.timelineservice.storage.TimelineWriter;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.ConverterUtils;
-import org.apache.log4j.Level;
-import org.apache.log4j.LogManager;
-import org.apache.log4j.Logger;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -131,7 +139,8 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 
 public class TestRMRestart extends ParameterizedSchedulerTestBase {
-  private static final Log LOG = LogFactory.getLog(TestRMRestart.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestRMRestart.class);
   private final static File TEMP_DIR = new File(System.getProperty(
     "test.build.data", "/tmp"), "decommision");
   private File hostFile = new File(TEMP_DIR + File.separator + "hostFile.txt");
@@ -141,11 +150,14 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   private static InetSocketAddress rmAddr;
   private List<MockRM> rms = new ArrayList<MockRM>();
 
+  public TestRMRestart(SchedulerType type) throws IOException {
+    super(type);
+  }
+
   @Before
   public void setup() throws IOException {
     conf = getConf();
-    Logger rootLogger = LogManager.getRootLogger();
-    rootLogger.setLevel(Level.DEBUG);
+    GenericTestUtils.setRootLogLevel(Level.DEBUG);
     UserGroupInformation.setConfiguration(conf);
     conf.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
     conf.setBoolean(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_ENABLED, false);
@@ -176,24 +188,24 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     return rm;
   }
 
-  @SuppressWarnings("rawtypes")
+  private MockRM createMockRM(YarnConfiguration config) {
+    MockRM rm = new MockRM(config);
+    rms.add(rm);
+    return rm;
+  }
+
   @Test (timeout=180000)
   public void testRMRestart() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+    // PHASE 1: create RM and get state
+    MockRM rm1 = createMockRM(conf);
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-                                                  rmState.getApplicationState();
-    
-    
-    // PHASE 1: create state in an RM
-    
-    // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
-    
+        memStore.getState().getApplicationState();
+
     // start like normal because state is empty
     rm1.start();
     
@@ -379,6 +391,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     // assert app1 attempt is saved
     attempt1 = loadedApp1.getCurrentAppAttempt();
     attemptId1 = attempt1.getAppAttemptId();
+    ((AbstractYarnScheduler)rm2.getResourceScheduler()).update();
     rm2.waitForState(attemptId1, RMAppAttemptState.ALLOCATED);
     appState = rmAppState.get(loadedApp1.getApplicationId());
     attemptState = appState.getAttempt(attemptId1);
@@ -445,18 +458,82 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     Assert.assertEquals(4, rmAppState.size());
   }
 
+  @Test(timeout = 60000)
+  public void testAppReportNodeLabelRMRestart() throws Exception {
+    if (getSchedulerType() != SchedulerType.CAPACITY) {
+      return;
+    }
+    // Create RM
+    YarnConfiguration newConf = new YarnConfiguration(conf);
+    newConf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
+    MockRM rm1 = createMockRM(newConf);
+    NodeLabel amLabel = NodeLabel.newInstance("AMLABEL");
+    NodeLabel appLabel = NodeLabel.newInstance("APPLABEL");
+    List<NodeLabel> labels = new ArrayList<>();
+    labels.add(amLabel);
+    labels.add(appLabel);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
+    rm1.start();
+    // Add label
+    rm1.getAdminService().addToClusterNodeLabels(
+        AddToClusterNodeLabelsRequest.newInstance(labels));
+    // create app and launch the AM
+    ResourceRequest amResourceRequest = ResourceRequest
+        .newInstance(Priority.newInstance(0), ResourceRequest.ANY,
+            Resource.newInstance(200, 1), 1, true, amLabel.getName());
+    ArrayList resReqs = new ArrayList<>();
+    resReqs.add(amResourceRequest);
+    RMApp app0 = rm1.submitApp(resReqs, appLabel.getName());
+    rm1.killApp(app0.getApplicationId());
+    rm1.waitForState(app0.getApplicationId(), RMAppState.KILLED);
+    // start new RM
+    MockRM rm2 = createMockRM(conf, memStore);
+    rm2.start();
+    Assert.assertEquals(1, rm2.getRMContext().getRMApps().size());
+    ApplicationReport appReport = rm2.getClientRMService().getApplicationReport(
+        GetApplicationReportRequest.newInstance(app0.getApplicationId()))
+        .getApplicationReport();
+    Assert
+        .assertEquals(amLabel.getName(), appReport.getAmNodeLabelExpression());
+    Assert.assertEquals(appLabel.getName(),
+        appReport.getAppNodeLabelExpression());
+    rm1.stop();
+    rm2.stop();
+  }
+
+  @Test(timeout = 60000)
+  public void testUnManagedRMRestart() throws Exception {
+    // Create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
+    rm1.start();
+    // create app and launch the AM
+    RMApp app0 =
+        rm1.submitApp(null, "name", "user", new HashMap<>(), true, "default");
+    rm1.killApp(app0.getApplicationId());
+    rm1.waitForState(app0.getApplicationId(), RMAppState.KILLED);
+    // start new RM
+    MockRM rm2 = createMockRM(conf, memStore);
+    rm2.start();
+    Assert.assertEquals(1, rm2.getRMContext().getRMApps().size());
+    ApplicationReport appReport = rm2.getClientRMService().getApplicationReport(
+        GetApplicationReportRequest.newInstance(app0.getApplicationId()))
+        .getApplicationReport();
+    Assert.assertEquals(true, appReport.isUnmanagedApp());
+    rm1.stop();
+    rm2.stop();
+  }
+
   @Test (timeout = 60000)
   public void testRMRestartAppRunningAMFailed() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-    Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
 
-    // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
+    // Create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
+    Map<ApplicationId, ApplicationStateData> rmAppState =
+        memStore.getState().getApplicationState();
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -506,14 +583,13 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     // be started immediately.
     YarnConfiguration conf = new YarnConfiguration(this.conf);
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 40);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-    
+        memStore.getState().getApplicationState();
     // start RM
-    final MockRM rm1 = createMockRM(conf, memStore);
     rm1.start();
     AbstractYarnScheduler ys =
         (AbstractYarnScheduler)rm1.getResourceScheduler();
@@ -534,7 +610,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     MockAM am2 = launchAM(app1, rm1, nm1);
 
     Assert.assertEquals(1, rmAppState.size());
-    Assert.assertEquals(app1.getState(), RMAppState.RUNNING);
+    assertThat(app1.getState()).isEqualTo(RMAppState.RUNNING);
     Assert.assertEquals(app1.getAppAttempts()
         .get(app1.getCurrentAppAttempt().getAppAttemptId())
         .getAppAttemptState(), RMAppAttemptState.RUNNING);
@@ -590,7 +666,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     rmApp = rm3.getRMContext().getRMApps().get(app1.getApplicationId());
     // application should be in ACCEPTED state
     rm3.waitForState(app1.getApplicationId(), RMAppState.ACCEPTED);
-    Assert.assertEquals(rmApp.getState(), RMAppState.ACCEPTED);
+    assertThat(rmApp.getState()).isEqualTo(RMAppState.ACCEPTED);
     // new attempt should not be started
     Assert.assertEquals(3, rmApp.getAppAttempts().size());
     // am1 and am2 attempts should be in FAILED state where as am3 should be
@@ -620,7 +696,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
             return new Boolean(rmAppForCheck.getAppAttempts().size() == 4);
           }
         },
-        100, maxRetry);
+        100, maxRetry * 100);
     Assert.assertEquals(RMAppAttemptState.FAILED,
         rmApp.getAppAttempts().get(latestAppAttemptId).getAppAttemptState());
     
@@ -672,19 +748,20 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   @Test (timeout = 60000)
   public void testRMRestartWaitForPreviousSucceededAttempt() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
-    MemoryRMStateStore memStore = new MemoryRMStateStore() {
+    MemoryRMStateStore memStore = new MockMemoryRMStateStore() {
       int count = 0;
 
       @Override
       public void updateApplicationStateInternal(ApplicationId appId,
           ApplicationStateData appStateData) throws Exception {
-        if (count == 0) {
-          // do nothing; simulate app final state is not saved.
+        if (count == 1) {
+          // Application state is updated on attempt launch.
+          // After that, do nothing; simulate app final state is not saved.
           LOG.info(appId + " final state is not saved.");
-          count++;
         } else {
           super.updateApplicationStateInternal(appId, appStateData);
         }
+        count++;
       }
     };
     memStore.init(conf);
@@ -698,7 +775,6 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 15120);
     RMApp app0 = rm1.submitApp(200);
     MockAM am0 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
-
     FinishApplicationMasterRequest req =
         FinishApplicationMasterRequest.newInstance(
           FinalApplicationStatus.SUCCEEDED, "", "");
@@ -725,14 +801,13 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   @Test (timeout = 60000)
   public void testRMRestartFailedApp() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 1);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-
+        memStore.getState().getApplicationState();
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -759,6 +834,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     RMApp loadedApp0 = rm2.getRMContext().getRMApps().get(app0.getApplicationId());
     rm2.waitForState(app0.getApplicationId(), RMAppState.FAILED);
     rm2.waitForState(am0.getApplicationAttemptId(), RMAppAttemptState.FAILED);
+    Assert.assertEquals(app0.getUser(), loadedApp0.getUser());
     // no new attempt is created.
     Assert.assertEquals(1, loadedApp0.getAppAttempts().size());
 
@@ -773,14 +849,13 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   public void testRMRestartKilledApp() throws Exception{
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-
+        memStore.getState().getApplicationState();
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -821,18 +896,18 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
   @Test (timeout = 60000)
   public void testRMRestartKilledAppWithNoAttempts() throws Exception {
-    MemoryRMStateStore memStore = new MemoryRMStateStore() {
+    MockMemoryRMStateStore memStore = new MockMemoryRMStateStore() {
       @Override
       public synchronized void storeApplicationAttemptStateInternal(
-          ApplicationAttemptId attemptId,
-          ApplicationAttemptStateData attemptStateData) throws Exception {
+          ApplicationAttemptId appAttemptId,
+          ApplicationAttemptStateData attemptState) throws Exception {
         // ignore attempt saving request.
       }
 
       @Override
       public synchronized void updateApplicationAttemptStateInternal(
-          ApplicationAttemptId attemptId,
-          ApplicationAttemptStateData attemptStateData) throws Exception {
+          ApplicationAttemptId appAttemptId,
+          ApplicationAttemptStateData attemptState) throws Exception {
         // ignore attempt saving request.
       }
     };
@@ -863,14 +938,14 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   public void testRMRestartSucceededApp() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+    // PHASE 1: create RM and get state
+    MockRM rm1 = createMockRM(conf);
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
+        memStore.getState().getApplicationState();
 
-    // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
+    // start like normal because state is empty
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -911,11 +986,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   @Test (timeout = 60000)
   public void testRMRestartGetApplicationList() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 1);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-
     // start RM
-    MockRM rm1 = new MockRM(conf, memStore) {
+    MockRM rm1 = new MockRM(conf) {
       @Override
       protected SystemMetricsPublisher createSystemMetricsPublisher() {
         return spy(super.createSystemMetricsPublisher());
@@ -926,6 +998,9 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
+
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
 
     // a succeeded app.
     RMApp app0 = rm1.submitApp(200, "name", "user", null,
@@ -1075,13 +1150,12 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();  
-    MockRM rm1 = createMockRM(conf, memStore);
+        memStore.getState().getApplicationState();
+    // start RM
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -1144,16 +1218,15 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   public void testRMRestartTimelineCollectorContext() throws Exception {
     conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
     conf.setFloat(YarnConfiguration.TIMELINE_SERVICE_VERSION, 2.0f);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-    Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
+
     MockRM rm1 = null;
     MockRM rm2 = null;
     try {
-      rm1 = createMockRM(conf, memStore);
+      rm1 = createMockRM(conf);
       rm1.start();
+      MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
+      Map<ApplicationId, ApplicationStateData> rmAppState =
+          memStore.getState().getApplicationState();
       MockNM nm1 =
           new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
       nm1.registerNode();
@@ -1210,13 +1283,12 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         "kerberos");
     UserGroupInformation.setConfiguration(conf);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-
+    // create RM
+    MockRM rm1 = new TestSecurityMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-    MockRM rm1 = new TestSecurityMockRM(conf, memStore);
+        memStore.getState().getApplicationState();
+    // start RM
     rm1.start();
 
     HashSet<Token<RMDelegationTokenIdentifier>> tokenSet =
@@ -1305,13 +1377,12 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
       "kerberos");
     UserGroupInformation.setConfiguration(conf);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-
+    // create RM
+    MockRM rm1 = new TestSecurityMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-    MockRM rm1 = new TestSecurityMockRM(conf, memStore);
+        memStore.getState().getApplicationState();
+    // start RM
     rm1.start();
     MockNM nm1 =
         new MockNM("0.0.0.0:4321", 15120, rm1.getResourceTrackerService());
@@ -1386,8 +1457,10 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         "kerberos");
     conf.set(YarnConfiguration.RM_ADDRESS, "localhost:8032");
     UserGroupInformation.setConfiguration(conf);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
+
+    MockRM rm1 = new TestSecurityMockRM(conf);
+    rm1.start();
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     RMState rmState = memStore.getState();
 
     Map<ApplicationId, ApplicationStateData> rmAppState =
@@ -1396,10 +1469,6 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         rmState.getRMDTSecretManagerState().getTokenState();
     Set<DelegationKey> rmDTMasterKeyState =
         rmState.getRMDTSecretManagerState().getMasterKeyState();
-
-    MockRM rm1 = new TestSecurityMockRM(conf, memStore);
-
-    rm1.start();
 
     // create an empty credential
     Credentials ts = new Credentials();
@@ -1535,10 +1604,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         "kerberos");
     conf.set(YarnConfiguration.RM_ADDRESS, "localhost:8032");
     UserGroupInformation.setConfiguration(conf);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
 
-    MockRM rm1 = new TestSecurityMockRM(conf, memStore);
+    MockRM rm1 = new TestSecurityMockRM(conf);
     rm1.start();
 
     GetDelegationTokenRequest request1 =
@@ -1551,7 +1618,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         ConverterUtils.convertFromYarn(response1.getRMDelegationToken(), rmAddr);
 
     // start new RM
-    MockRM rm2 = new TestSecurityMockRM(conf, memStore);
+    MockRM rm2 = new TestSecurityMockRM(conf, rm1.getRMStateStore());
     rm2.start();
 
     // submit an app with the old delegation token got from previous RM.
@@ -1579,7 +1646,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
         // Skip if synchronous updation of DTToken
         if (!(event instanceof RMStateStoreAMRMTokenEvent)
             && !(event instanceof RMStateStoreRMDTEvent)
-            && !(event instanceof RMStateStoreRMDTMasterKeyEvent)) {
+            && !(event instanceof RMStateStoreRMDTMasterKeyEvent)
+            && !(event instanceof RMStateStoreProxyCAEvent)) {
           while (wait);
         }
         super.handleStoreEvent(event);
@@ -1629,14 +1697,14 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
   @Test (timeout = 60000)
   public void testFinishedAppRemovalAfterRMRestart() throws Exception {
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
     conf.setInt(YarnConfiguration.RM_MAX_COMPLETED_APPLICATIONS, 1);
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
 
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
+    MockRM rm1 = createMockRM(conf);
     rm1.start();
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
+    RMState rmState = memStore.getState();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
@@ -1674,7 +1742,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   // This is to test RM does not get hang on shutdown.
   @Test (timeout = 10000)
   public void testRMShutdown() throws Exception {
-    MemoryRMStateStore memStore = new MemoryRMStateStore() {
+    MemoryRMStateStore memStore = new MockMemoryRMStateStore() {
       @Override
       public synchronized void checkVersion()
           throws Exception {
@@ -1730,8 +1798,11 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
     rm1.waitForState(am1.getApplicationAttemptId(), RMAppAttemptState.KILLED);
     rm1.waitForState(app1.getApplicationId(), RMAppState.KILLED);
-    Assert.assertEquals(1, ((TestMemoryRMStateStore) memStore).updateAttempt);
-    Assert.assertEquals(2, ((TestMemoryRMStateStore) memStore).updateApp);
+    // count = 1 on storing RMApp launchTime
+    // count = 2 on storing attempt state on kill
+    // count = 3 on storing app state on kill
+    Assert.assertEquals(2, ((TestMemoryRMStateStore) memStore).updateAttempt);
+    Assert.assertEquals(3, ((TestMemoryRMStateStore) memStore).updateApp);
   }
 
   // Test Application that fails on submission is saved in state store.
@@ -1740,36 +1811,31 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
       "kerberos");
     UserGroupInformation.setConfiguration(conf);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-
-    MockRM rm1 = new TestSecurityMockRM(conf, memStore) {
-      @Override
-      protected RMAppManager createRMAppManager() {
-        return new TestRMAppManager(this.rmContext, this.scheduler,
-          this.masterService, this.applicationACLsManager, conf);
+    MockRM rm1 = new TestSecurityMockRM(conf) {
+      class TestDelegationTokenRenewer extends DelegationTokenRenewer {
+        public void addApplicationAsync(ApplicationId applicationId, Credentials ts,
+            boolean shouldCancelAtEnd, String user, Configuration appConf) {
+          throw new RuntimeException("failed to submit app");
+        }
       }
-
-      class TestRMAppManager extends RMAppManager {
-
-        public TestRMAppManager(RMContext context, YarnScheduler scheduler,
-            ApplicationMasterService masterService,
-            ApplicationACLsManager applicationACLsManager, Configuration conf) {
-          super(context, scheduler, masterService, applicationACLsManager, conf);
-        }
-
-        @Override
-        protected Credentials parseCredentials(
-            ApplicationSubmissionContext application) throws IOException {
-          throw new IOException("Parsing credential error.");
-        }
+      @Override
+      protected DelegationTokenRenewer createDelegationTokenRenewer() {
+        return new TestDelegationTokenRenewer();
       }
     };
     rm1.start();
-    RMApp app1 =
-        rm1.submitApp(200, "name", "user",
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
+    RMApp app1 = null;
+    try {
+       app1 = rm1.submitApp(200, "name", "user",
           new HashMap<ApplicationAccessType, String>(), false, "default", -1,
           null, "MAPREDUCE", false);
+      Assert.fail();
+    } catch (Exception e) {
+
+    }
+    app1 = rm1.getRMContext().getRMApps().values().iterator().next();
     rm1.waitForState(app1.getApplicationId(), RMAppState.FAILED);
     // Check app staet is saved in state store.
     Assert.assertEquals(RMAppState.FAILED, memStore.getState()
@@ -1838,12 +1904,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   public void testQueueMetricsOnRMRestart() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-
-    // PHASE 1: create state in an RM
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
+    MockRM rm1 = createMockRM(conf);
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -1881,7 +1943,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
     // PHASE 2: create new RM and start from old state
     // create new RM to represent restart and recover state
-    MockRM rm2 = createMockRM(conf, memStore);
+    MockRM rm2 = createMockRM(conf, rm1.getRMStateStore());
     QueueMetrics qm2 = rm2.getResourceScheduler().getRootQueueMetrics();
     resetQueueMetrics(qm2);
     assertQueueMetrics(qm2, 0, 0, 0, 0);
@@ -1961,8 +2023,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   }
 
   @Test (timeout = 60000)
-  public void testDecomissionedNMsMetricsOnRMRestart() throws Exception {
-    YarnConfiguration conf = new YarnConfiguration();
+  public void testDecommissionedNMsMetricsOnRMRestart() throws Exception {
     conf.set(YarnConfiguration.RM_NODES_EXCLUDE_FILE_PATH,
       hostFile.getAbsolutePath());
     writeToHostsFile("");
@@ -2041,11 +2102,10 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
     conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
       "kerberos");
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
+    UserGroupInformation.setConfiguration(conf);
 
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
+    MockRM rm1 = new TestSecurityMockRM(conf);
     rm1.start();
     final MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -2053,7 +2113,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     RMApp app0 = rm1.submitApp(200);
     final MockAM am0 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
 
-    MockRM rm2 = new MockRM(conf, memStore) {
+    MockRM rm2 = new TestSecurityMockRM(conf, rm1.getRMStateStore()) {
       @Override
       protected ResourceTrackerService createResourceTrackerService() {
         return new ResourceTrackerService(this.rmContext,
@@ -2126,7 +2186,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     NMContainerStatus containerReport =
         NMContainerStatus.newInstance(containerId, 0, containerState,
             Resource.newInstance(1024, 1), "recover container", 0,
-            Priority.newInstance(0), 0, nodeLabelExpression);
+            Priority.newInstance(0), 0, nodeLabelExpression,
+            ExecutionType.GUARANTEED, -1);
     return containerReport;
   }
 
@@ -2158,6 +2219,10 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
     public TestSecurityMockRM(Configuration conf, RMStateStore store) {
       super(conf, store);
+    }
+
+    public TestSecurityMockRM(Configuration conf) {
+      super(conf);
     }
 
     @Override
@@ -2210,10 +2275,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     conf.set(YarnConfiguration.FS_NODE_LABELS_STORE_ROOT_DIR,
         nodeLabelFsStoreDirURI);
     
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
     conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
-    MockRM rm1 = new MockRM(conf, memStore) {
+    MockRM rm1 = new MockRM(conf) {
       @Override
       protected RMNodeLabelsManager createNodeLabelManager() {
         RMNodeLabelsManager mgr = new RMNodeLabelsManager();
@@ -2263,7 +2326,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     Assert.assertEquals(1, nodeLabelManager.getNodeLabels().size());
     Assert.assertTrue(nodeLabels.get(n1).equals(toSet("y")));
 
-    MockRM rm2 = new MockRM(conf, memStore) {
+    MockRM rm2 = new MockRM(conf, rm1.getRMStateStore()) {
       @Override
       protected RMNodeLabelsManager createNodeLabelManager() {
         RMNodeLabelsManager mgr = new RMNodeLabelsManager();
@@ -2292,14 +2355,12 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     int maxAttempt =
         conf.getInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
             YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     Map<ApplicationId, ApplicationStateData> rmAppState =
-        rmState.getApplicationState();
-
+        memStore.getState().getApplicationState();
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -2367,10 +2428,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     conf.set(YarnConfiguration.FS_NODE_LABELS_STORE_ROOT_DIR,
         nodeLabelFsStoreDirURI);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
     conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
-    MockRM rm1 = new MockRM(conf, memStore) {
+    MockRM rm1 = new MockRM(conf) {
       @Override
       protected RMNodeLabelsManager createNodeLabelManager() {
         RMNodeLabelsManager mgr = new RMNodeLabelsManager();
@@ -2398,7 +2457,7 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     nodeLabelManager.replaceLabelsOnNode(ImmutableMap.of(n1, toSet("x")));
     MockRM rm2 = null;
     for (int i = 0; i < 2; i++) {
-      rm2 = new MockRM(conf, memStore) {
+      rm2 = new MockRM(conf, rm1.getRMStateStore()) {
         @Override
         protected RMNodeLabelsManager createNodeLabelManager() {
           RMNodeLabelsManager mgr = new RMNodeLabelsManager();
@@ -2421,17 +2480,16 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
   @Test(timeout = 120000)
   public void testRMRestartAfterPreemption() throws Exception {
-    Configuration conf = new Configuration();
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
     if (!getSchedulerType().equals(SchedulerType.CAPACITY)) {
       return;
     }
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
     // start RM
-    MockRM rm1 = new MockRM(conf, memStore);
+    MockRM rm1 = new MockRM(conf);
     rm1.start();
     CapacityScheduler cs = (CapacityScheduler) rm1.getResourceScheduler();
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
 
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -2482,11 +2540,10 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
   @Test(timeout = 60000)
   public void testRMRestartOnMissingAttempts() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 5);
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-
+    // create RM
+    MockRM rm1 = createMockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     // start RM
-    MockRM rm1 = createMockRM(conf, memStore);
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
@@ -2494,8 +2551,6 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
     // create an app and finish the app.
     RMApp app0 = rm1.submitApp(200);
-    ApplicationStateData app0State = memStore.getState().getApplicationState()
-        .get(app0.getApplicationId());
 
     MockAM am0 = launchAndFailAM(app0, rm1, nm1);
     MockAM am1 = launchAndFailAM(app0, rm1, nm1);
@@ -2504,6 +2559,8 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
 
     // am1 is missed from MemoryRMStateStore
     memStore.removeApplicationAttemptInternal(am1.getApplicationAttemptId());
+    ApplicationStateData app0State = memStore.getState().getApplicationState()
+        .get(app0.getApplicationId());
     ApplicationAttemptStateData am2State = app0State.getAttempt(
         am2.getApplicationAttemptId());
     // am2's state is not consistent: MemoryRMStateStore just saved its initial
@@ -2538,5 +2595,246 @@ public class TestRMRestart extends ParameterizedSchedulerTestBase {
     nm.nodeHeartbeat(am.getApplicationAttemptId(), 1, ContainerState.COMPLETE);
     rm.waitForState(am.getApplicationAttemptId(), RMAppAttemptState.FAILED);
     return am;
+  }
+
+  @Test(timeout = 60000)
+  public void testRMRestartAfterNodeLabelDisabled() throws Exception {
+    if (getSchedulerType() != SchedulerType.CAPACITY) {
+      return;
+    }
+
+    // Initial FS node label store root dir to a random tmp dir
+    File nodeLabelFsStoreDir = new File("target",
+        this.getClass().getSimpleName()
+            + "-testRMRestartAfterNodeLabelDisabled");
+    if (nodeLabelFsStoreDir.exists()) {
+      FileUtils.deleteDirectory(nodeLabelFsStoreDir);
+    }
+    nodeLabelFsStoreDir.deleteOnExit();
+    String nodeLabelFsStoreDirURI = nodeLabelFsStoreDir.toURI().toString();
+    conf.set(YarnConfiguration.FS_NODE_LABELS_STORE_ROOT_DIR,
+        nodeLabelFsStoreDirURI);
+
+    conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
+
+    MockRM rm1 = new MockRM(
+        TestUtils.getConfigurationWithDefaultQueueLabels(conf)) {
+      @Override
+      protected RMNodeLabelsManager createNodeLabelManager() {
+        RMNodeLabelsManager mgr = new RMNodeLabelsManager();
+        mgr.init(getConfig());
+        return mgr;
+      }
+    };
+    rm1.start();
+    MockMemoryRMStateStore memStore =
+        (MockMemoryRMStateStore) rm1.getRMStateStore();
+
+    // add node label "x" and set node to label mapping
+    Set<String> clusterNodeLabels = new HashSet<String>();
+    clusterNodeLabels.add("x");
+    RMNodeLabelsManager nodeLabelManager =
+        rm1.getRMContext().getNodeLabelManager();
+    nodeLabelManager.
+        addToCluserNodeLabelsWithDefaultExclusivity(clusterNodeLabels);
+    nodeLabelManager.addLabelsToNode(
+        ImmutableMap.of(NodeId.newInstance("h1", 0), toSet("x")));
+    MockNM nm1 = rm1.registerNode("h1:1234", 8000); // label = x
+
+    // submit an application with specifying am node label expression as "x"
+    RMApp app1 = rm1.submitApp(200, "someApp", "someUser", null, "a1", "x");
+    // check am container allocated with correct node label expression
+    MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
+    ContainerId  amContainerId1 =
+        ContainerId.newContainerId(am1.getApplicationAttemptId(), 1);
+    Assert.assertEquals("x", rm1.getRMContext().getScheduler().
+        getRMContainer(amContainerId1).getNodeLabelExpression());
+    finishApplicationMaster(app1, rm1, nm1, am1);
+
+    // restart rm with node label disabled
+    conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, false);
+    MockRM rm2 = new MockRM(
+        TestUtils.getConfigurationWithDefaultQueueLabels(conf),
+        memStore) {
+      @Override
+      protected RMNodeLabelsManager createNodeLabelManager() {
+        RMNodeLabelsManager mgr = new RMNodeLabelsManager();
+        mgr.init(getConfig());
+        return mgr;
+      }
+    };
+
+    // rm should successfully start with app1 loaded back in SUCCESS state
+    // by pushing app to run default label for am container and let other
+    // containers to run normally.
+
+    try {
+      rm2.start();
+      Assert.assertTrue("RM start successfully", true);
+      Assert.assertEquals(1, rm2.getRMContext().getRMApps().size());
+    } catch (Exception e) {
+      LOG.debug("Exception on start", e);
+      Assert.fail("RM should start without any issue");
+    } finally {
+      rm1.stop();
+      rm2.stop();
+    }
+  }
+
+  @Test(timeout = 20000)
+  public void testRMRestartAfterPriorityChangesInAllocatedResponse()
+      throws Exception {
+    conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
+        "kerberos");
+    UserGroupInformation.setConfiguration(conf);
+    conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
+        ResourceScheduler.class);
+
+    // Set Max Application Priority as 10
+    conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY,
+        10);
+    conf.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
+    conf.setBoolean(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_ENABLED,
+        false);
+
+    //Start RM
+    conf.set(YarnConfiguration.RM_STORE, MemoryRMStateStore.class.getName());
+    MockRM rm = new TestSecurityMockRM(conf);
+    rm.start();
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm.getRMStateStore();
+
+    // Register node1
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * 1024);
+
+    // Submit an application
+    Priority appPriority1 = Priority.newInstance(5);
+    RMApp app1 = rm.submitApp(2048, appPriority1,
+        getCreds(), getTokensConf());
+
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+    MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    am1.registerAppAttempt();
+
+    AllocateRequestPBImpl allocateRequest = new AllocateRequestPBImpl();
+    List<ContainerId> release = new ArrayList<ContainerId>();
+    List<ResourceRequest> ask = new ArrayList<ResourceRequest>();
+    allocateRequest.setReleaseList(release);
+    allocateRequest.setAskList(ask);
+
+    AllocateResponse response1 = am1.allocate(allocateRequest);
+    Assert.assertEquals(appPriority1, response1.getApplicationPriority());
+
+    // Change the priority of App1 to 8
+    Priority appPriority2 = Priority.newInstance(8);
+    UserGroupInformation ugi = UserGroupInformation
+        .createRemoteUser(app1.getUser());
+    rm.getRMAppManager().updateApplicationPriority(ugi,
+        app1.getApplicationId(), appPriority2);
+
+    AllocateResponse response2 = am1.allocate(allocateRequest);
+    Assert.assertEquals(appPriority2, response2.getApplicationPriority());
+
+    /*
+     * Ensure tokensConf has been retained even after UPDATE_APP event in
+     * RMStateStore, which gets triggered because of change in priority.
+     *
+     */
+    Map<ApplicationId, ApplicationStateData> rmAppState =
+        memStore.getState().getApplicationState();
+    ApplicationStateData appState =
+        rmAppState.get(app1.getApplicationId());
+    Assert.assertEquals(getTokensConf(),
+        appState.getApplicationSubmissionContext().
+        getAMContainerSpec().getTokensConf());
+
+
+    MockRM rm2 = new TestSecurityMockRM(conf, memStore);
+    rm2.start();
+
+    AllocateResponse response3 = am1.allocate(allocateRequest);
+    Assert.assertEquals(appPriority2, response3.getApplicationPriority());
+
+    /*
+     * Ensure tokensConf has been retained even after RECOVER event in
+     * RMStateStore, which gets triggered as part of RM START.
+     */
+    Map<ApplicationId, ApplicationStateData> rmAppStateNew =
+        memStore.getState().getApplicationState();
+    ApplicationStateData appStateNew =
+        rmAppStateNew.get(app1.getApplicationId());
+    Assert.assertEquals(getTokensConf(),
+        appStateNew.getApplicationSubmissionContext().
+        getAMContainerSpec().getTokensConf());
+
+    rm.stop();
+    rm2.stop();
+  }
+
+  @Test(timeout = 20000)
+  public void testRMRestartAfterUpdateTrackingUrl() throws Exception {
+    MockRM rm = new MockRM(conf);
+    rm.start();
+
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm.getRMStateStore();
+
+    // Register node1
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * 1024);
+
+    RMApp app1 = rm.submitApp(2048);
+
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+    MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    am1.registerAppAttempt();
+
+    AllocateRequestPBImpl allocateRequest = new AllocateRequestPBImpl();
+    String newTrackingUrl = "hadoop.apache.org";
+    allocateRequest.setTrackingUrl(newTrackingUrl);
+
+    am1.allocate(allocateRequest);
+    // Check in-memory and stored tracking url
+    Assert.assertEquals(newTrackingUrl, rm.getRMContext().getRMApps().get(
+        app1.getApplicationId()).getOriginalTrackingUrl());
+    Assert.assertEquals(newTrackingUrl, rm.getRMContext().getRMApps().get(
+        app1.getApplicationId()).getCurrentAppAttempt()
+        .getOriginalTrackingUrl());
+    Assert.assertEquals(newTrackingUrl, memStore.getState()
+        .getApplicationState().get(app1.getApplicationId())
+        .getAttempt(attempt1.getAppAttemptId()).getFinalTrackingUrl());
+
+    // Start new RM, should recover updated tracking url
+    MockRM rm2 = new MockRM(conf, memStore);
+    rm2.start();
+    Assert.assertEquals(newTrackingUrl, rm.getRMContext().getRMApps().get(
+        app1.getApplicationId()).getOriginalTrackingUrl());
+    Assert.assertEquals(newTrackingUrl, rm.getRMContext().getRMApps().get(
+        app1.getApplicationId()).getCurrentAppAttempt()
+        .getOriginalTrackingUrl());
+
+    rm.stop();
+    rm2.stop();
+  }
+
+  private Credentials getCreds() throws IOException {
+    Credentials ts = new Credentials();
+    DataOutputBuffer dob = new DataOutputBuffer();
+    ts.writeTokenStorageToStream(dob);
+    return ts;
+  }
+
+  private ByteBuffer getTokensConf() throws IOException {
+    DataOutputBuffer dob = new DataOutputBuffer();
+    Configuration appConf = new Configuration(false);
+    appConf.clear();
+    appConf.set("dfs.nameservices", "mycluster1,mycluster2");
+    appConf.set("dfs.namenode.rpc-address.mycluster2.nn1",
+        "123.0.0.1");
+    appConf.set("dfs.namenode.rpc-address.mycluster3.nn2",
+        "123.0.0.2");
+    appConf.write(dob);
+    ByteBuffer tokenConf =
+        ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
+    return tokenConf;
   }
 }

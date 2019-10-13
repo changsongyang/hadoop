@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
-import static org.junit.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -36,16 +35,12 @@ import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.resourcemanager.MockAM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockNM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockNodes;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.MemoryRMStateStore;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptImpl;
@@ -145,9 +140,9 @@ public class TestApplicationPriority {
 
     // Now, the first assignment will be for app2 since app2 is of highest
     // priority
-    assertEquals(q.getApplications().size(), 2);
-    assertEquals(q.getApplications().iterator().next()
-        .getApplicationAttemptId(), appAttemptId2);
+    assertThat(q.getApplications()).hasSize(2);
+    assertThat(q.getApplications().iterator().next().getApplicationAttemptId())
+        .isEqualTo(appAttemptId2);
 
     rm.stop();
   }
@@ -407,16 +402,11 @@ public class TestApplicationPriority {
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
     conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY, 10);
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    RMState rmState = memStore.getState();
-    Map<ApplicationId, ApplicationStateData> rmAppState = rmState
-        .getApplicationState();
-
     // PHASE 1: create state in an RM
 
     // start RM
-    MockRM rm1 = new MockRM(conf, memStore);
+    MockRM rm1 = new MockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     rm1.start();
 
     MockNM nm1 = new MockNM("127.0.0.1:1234", 15120,
@@ -612,24 +602,15 @@ public class TestApplicationPriority {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
     conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY, 10);
-    final DrainDispatcher dispatcher = new DrainDispatcher();
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-
-    MockRM rm1 = new MockRM(conf, memStore) {
-      @Override
-      protected Dispatcher createDispatcher() {
-        return dispatcher;
-      }
-    };
+    MockRM rm1 = new MockRM(conf);
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     rm1.start();
 
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 16384, rm1.getResourceTrackerService());
     nm1.registerNode();
-
-    dispatcher.await();
+    rm1.drainEvents();
 
     ResourceScheduler scheduler = rm1.getRMContext().getScheduler();
     LeafQueue defaultQueue =
@@ -648,7 +629,7 @@ public class TestApplicationPriority {
     MockAM am2 = MockRM.launchAM(app2, rm1, nm1);
     am2.registerAppAttempt();
 
-    dispatcher.await();
+    rm1.drainEvents();
     Assert.assertEquals(2, defaultQueue.getNumActiveApplications());
     Assert.assertEquals(0, defaultQueue.getNumPendingApplications());
 
@@ -657,7 +638,7 @@ public class TestApplicationPriority {
     Priority appPriority3 = Priority.newInstance(7);
     RMApp app3 = rm1.submitApp(memory, appPriority3);
 
-    dispatcher.await();
+    rm1.drainEvents();
     Assert.assertEquals(2, defaultQueue.getNumActiveApplications());
     Assert.assertEquals(1, defaultQueue.getNumPendingApplications());
 
@@ -676,14 +657,8 @@ public class TestApplicationPriority {
     Assert.assertEquals(app3.getCurrentAppAttempt().getAppAttemptId(),
         fcApp3.getApplicationAttemptId());
 
-    final DrainDispatcher dispatcher1 = new DrainDispatcher();
     // create new RM to represent restart and recover state
-    MockRM rm2 = new MockRM(conf, memStore) {
-      @Override
-      protected Dispatcher createDispatcher() {
-        return dispatcher1;
-      }
-    };
+    MockRM rm2 = new MockRM(conf, memStore);
 
     // start new RM
     rm2.start();
@@ -693,7 +668,7 @@ public class TestApplicationPriority {
     // Verify RM Apps after this restart
     Assert.assertEquals(3, rm2.getRMContext().getRMApps().size());
 
-    dispatcher1.await();
+    rm2.drainEvents();
     scheduler = rm2.getRMContext().getScheduler();
     defaultQueue =
         (LeafQueue) ((CapacityScheduler) scheduler).getQueue("default");
@@ -714,7 +689,7 @@ public class TestApplicationPriority {
 
     // NM resync to new RM
     nm1.registerNode();
-    dispatcher1.await();
+    rm2.drainEvents();
 
     // wait for activating applications
     count = 50;

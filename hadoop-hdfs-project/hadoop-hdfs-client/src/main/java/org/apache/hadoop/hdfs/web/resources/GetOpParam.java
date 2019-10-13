@@ -28,6 +28,7 @@ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
     GETFILESTATUS(false, HttpURLConnection.HTTP_OK),
     LISTSTATUS(false, HttpURLConnection.HTTP_OK),
     GETCONTENTSUMMARY(false, HttpURLConnection.HTTP_OK),
+    GETQUOTAUSAGE(false, HttpURLConnection.HTTP_OK),
     GETFILECHECKSUM(true, HttpURLConnection.HTTP_OK),
 
     GETHOMEDIRECTORY(false, HttpURLConnection.HTTP_OK),
@@ -53,10 +54,15 @@ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
     GETALLSTORAGEPOLICY(false, HttpURLConnection.HTTP_OK),
     GETSTORAGEPOLICY(false, HttpURLConnection.HTTP_OK),
 
+    GETECPOLICY(false, HttpURLConnection.HTTP_OK),
+
     NULL(false, HttpURLConnection.HTTP_NOT_IMPLEMENTED),
 
     CHECKACCESS(false, HttpURLConnection.HTTP_OK),
-    LISTSTATUS_BATCH(false, HttpURLConnection.HTTP_OK);
+    LISTSTATUS_BATCH(false, HttpURLConnection.HTTP_OK),
+    GETSERVERDEFAULTS(false, HttpURLConnection.HTTP_OK),
+    GETSNAPSHOTDIFF(false, HttpURLConnection.HTTP_OK),
+    GETSNAPSHOTTABLEDIRECTORYLIST(false, HttpURLConnection.HTTP_OK);
 
     final boolean redirect;
     final int expectedHttpResponseCode;
@@ -111,7 +117,16 @@ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
    * @param str a string representation of the parameter value.
    */
   public GetOpParam(final String str) {
-    super(DOMAIN, DOMAIN.parse(str));
+    super(DOMAIN, getOp(str));
+  }
+
+  private static Op getOp(String str) {
+    try {
+      return DOMAIN.parse(str);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(str + " is not a valid " + Type.GET
+          + " operation.");
+    }
   }
 
   @Override

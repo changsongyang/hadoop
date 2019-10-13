@@ -25,8 +25,6 @@ import java.util.Arrays;
 import java.util.Timer;
 import java.util.TimerTask;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.service.AbstractService;
@@ -34,6 +32,8 @@ import org.apache.hadoop.util.Shell.ExitCodeException;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 
@@ -43,7 +43,8 @@ import org.apache.hadoop.util.StringUtils;
  */
 public class NodeHealthScriptRunner extends AbstractService {
 
-  private static Log LOG = LogFactory.getLog(NodeHealthScriptRunner.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(NodeHealthScriptRunner.class);
 
   /** Absolute path to the health script. */
   private String nodeHealthScript;
@@ -162,6 +163,7 @@ public class NodeHealthScriptRunner extends AbstractService {
         setHealthStatus(false, exceptionStackTrace);
         break;
       case FAILED_WITH_EXIT_CODE:
+        // see Javadoc above - we don't report bad health intentionally
         setHealthStatus(true, "", now);
         break;
       case FAILED:
@@ -248,7 +250,7 @@ public class NodeHealthScriptRunner extends AbstractService {
   }
 
   /**
-   * Sets if the node is healhty or not considering disks' health also.
+   * Sets if the node is healthy or not considering disks' health also.
    * 
    * @param isHealthy
    *          if or not node is healthy

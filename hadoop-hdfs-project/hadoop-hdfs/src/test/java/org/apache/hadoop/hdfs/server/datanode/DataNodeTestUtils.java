@@ -22,28 +22,30 @@ package org.apache.hadoop.hdfs.server.datanode;
 import java.io.File;
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.ReconfigurationException;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetTestUtil;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeImpl;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
-import org.mockito.Mockito;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
+import org.apache.hadoop.test.GenericTestUtils;
+
+import com.google.common.base.Supplier;
 
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertThat;
-import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.doAnswer;
+
+/**
+ * DO NOT ADD MOCKITO IMPORTS HERE Or Downstream projects may not
+ * be able to start mini dfs cluster. THANKS.
+ */
 
 /**
  * Utility class for accessing package-private DataNode information during tests.
@@ -51,8 +53,8 @@ import static org.mockito.Mockito.doAnswer;
  * dependencies to {@link MiniDFSCluster}.
  */
 public class DataNodeTestUtils {
-  private static final Log LOG =
-      LogFactory.getLog(DataNodeTestUtils.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DataNodeTestUtils.class);
   private static final String DIR_FAILURE_SUFFIX = ".origin";
 
   public final static String TEST_CLUSTER_ID = "testClusterID";
@@ -94,6 +96,14 @@ public class DataNodeTestUtils {
     for (BPOfferService bpos : dn.getAllBpOs()) {
       bpos.triggerBlockReportForTests();
     }
+  }
+
+  public static void pauseIBR(DataNode dn) {
+    dn.setIBRDisabledForTest(true);
+  }
+
+  public static void resumeIBR(DataNode dn) {
+    dn.setIBRDisabledForTest(false);
   }
 
   public static InterDatanodeProtocol createInterDatanodeProtocolProxy(
@@ -194,27 +204,6 @@ public class DataNodeTestUtils {
   }
 
   /**
-   * This method is used to mock the data node block pinning API.
-   *
-   * @param dn datanode
-   * @param pinned true if the block is pinned, false otherwise
-   * @throws IOException
-   */
-  public static void mockDatanodeBlkPinning(final DataNode dn,
-      final boolean pinned) throws IOException {
-    final FsDatasetSpi<? extends FsVolumeSpi> data = dn.data;
-    dn.data = Mockito.spy(data);
-
-    doAnswer(new Answer<Object>() {
-      public Object answer(InvocationOnMock invocation) throws IOException {
-        // Bypass the argument to FsDatasetImpl#getPinning to show that
-        // the block is pinned.
-        return pinned;
-      }
-    }).when(dn.data).getPinning(any(ExtendedBlock.class));
-  }
-
-  /**
    * Reconfigure a DataNode by setting a new list of volumes.
    *
    * @param dn DataNode to reconfigure
@@ -256,5 +245,28 @@ public class DataNodeTestUtils {
       }
     }
     return null;
+  }
+
+  /**
+   * Call and wait DataNode to detect disk failure.
+   *
+   * @param dn
+   * @param volume
+   * @throws Exception
+   */
+  public static void waitForDiskError(DataNode dn, FsVolumeSpi volume)
+      throws Exception {
+    LOG.info("Starting to wait for datanode to detect disk failure.");
+    final long lastDiskErrorCheck = dn.getLastDiskErrorCheck();
+    dn.checkDiskErrorAsync(volume);
+    // Wait 10 seconds for checkDiskError thread to finish and discover volume
+    // failures.
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+
+      @Override
+      public Boolean get() {
+        return dn.getLastDiskErrorCheck() != lastDiskErrorCheck;
+      }
+    }, 100, 10000);
   }
 }

@@ -20,23 +20,15 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy;
 
 import java.util.*;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.api.records.NodeLabel;
-import org.apache.hadoop.yarn.server.resourcemanager.MockAM;
-import org.apache.hadoop.yarn.server.resourcemanager.MockNM;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
-import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
 import org.junit.Assert;
 import org.junit.Test;
 
-import org.apache.hadoop.yarn.api.records.Priority;
-import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 
@@ -134,19 +126,25 @@ public class TestFairOrderingPolicy {
 
 
     //Assignment, least to greatest consumption
-    checkIds(schedOrder.getAssignmentIterator(), new String[]{"3", "2", "1"});
+    checkIds(schedOrder.getAssignmentIterator(
+        IteratorSelector.EMPTY_ITERATOR_SELECTOR),
+        new String[]{"3", "2", "1"});
 
     //Preemption, greatest to least
     checkIds(schedOrder.getPreemptionIterator(), new String[]{"1", "2", "3"});
 
     //Change value without inform, should see no change
     msp2.setUsed(Resources.createResource(6));
-    checkIds(schedOrder.getAssignmentIterator(), new String[]{"3", "2", "1"});
+    checkIds(schedOrder.getAssignmentIterator(
+        IteratorSelector.EMPTY_ITERATOR_SELECTOR),
+        new String[]{"3", "2", "1"});
     checkIds(schedOrder.getPreemptionIterator(), new String[]{"1", "2", "3"});
 
     //Do inform, will reorder
     schedOrder.containerAllocated(msp2, null);
-    checkIds(schedOrder.getAssignmentIterator(), new String[]{"3", "1", "2"});
+    checkIds(schedOrder.getAssignmentIterator(
+        IteratorSelector.EMPTY_ITERATOR_SELECTOR),
+        new String[]{"3", "1", "2"});
     checkIds(schedOrder.getPreemptionIterator(), new String[]{"2", "1", "3"});
   }
 
@@ -157,7 +155,10 @@ public class TestFairOrderingPolicy {
 
     // Define top-level queues
     String queuePath = CapacitySchedulerConfiguration.ROOT + ".default";
-    csConf.setOrderingPolicy(queuePath, CapacitySchedulerConfiguration.FAIR_ORDERING_POLICY);
+    csConf.set(YarnConfiguration.RM_SCHEDULER,
+        CapacityScheduler.class.getCanonicalName());
+    csConf.setOrderingPolicy(queuePath,
+        CapacitySchedulerConfiguration.FAIR_APP_ORDERING_POLICY);
     csConf.setOrderingPolicyParameter(queuePath,
         FairOrderingPolicy.ENABLE_SIZE_BASED_WEIGHT, "true");
     csConf.setMaximumApplicationMasterResourcePerQueuePercent(queuePath, 0.1f);

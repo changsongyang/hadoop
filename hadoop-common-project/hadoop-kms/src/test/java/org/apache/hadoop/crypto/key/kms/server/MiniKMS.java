@@ -105,15 +105,11 @@ public class MiniKMS {
 
   private void copyResource(String inputResourceName, File outputFile) throws
       IOException {
-    InputStream is = null;
-    OutputStream os = null;
-    try {
-      is = ThreadUtil.getResourceAsStream(inputResourceName);
-      os = new FileOutputStream(outputFile);
+    InputStream is = ThreadUtil.getResourceAsStream(inputResourceName);
+    try (OutputStream os = new FileOutputStream(outputFile)) {
       IOUtils.copy(is, os);
     } finally {
       IOUtils.closeQuietly(is);
-      IOUtils.closeQuietly(os);
     }
   }
 
@@ -145,14 +141,17 @@ public class MiniKMS {
     final Configuration conf = KMSConfiguration.getKMSConf();
     conf.set(KMSConfiguration.HTTP_HOST_KEY, "localhost");
     conf.setInt(KMSConfiguration.HTTP_PORT_KEY, inPort);
+
+    Configuration sslConf = null;
     if (keyStore != null) {
       conf.setBoolean(KMSConfiguration.SSL_ENABLED_KEY, true);
-      conf.set(SSLFactory.SSL_SERVER_KEYSTORE_LOCATION, keyStore);
-      conf.set(SSLFactory.SSL_SERVER_KEYSTORE_PASSWORD, keyStorePassword);
-      conf.set(SSLFactory.SSL_SERVER_KEYSTORE_TYPE, "jks");
+      sslConf = SSLFactory.readSSLConfiguration(conf, SSLFactory.Mode.SERVER);
+      sslConf.set(SSLFactory.SSL_SERVER_KEYSTORE_LOCATION, keyStore);
+      sslConf.set(SSLFactory.SSL_SERVER_KEYSTORE_PASSWORD, keyStorePassword);
+      sslConf.set(SSLFactory.SSL_SERVER_KEYSTORE_TYPE, "jks");
     }
 
-    jetty = new KMSWebServer(conf);
+    jetty = new KMSWebServer(conf, sslConf);
     jetty.start();
     kmsURL = jetty.getKMSUrl();
   }

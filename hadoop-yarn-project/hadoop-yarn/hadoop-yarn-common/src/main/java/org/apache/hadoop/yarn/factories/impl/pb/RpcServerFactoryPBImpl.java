@@ -26,8 +26,8 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
@@ -43,7 +43,8 @@ import com.google.protobuf.BlockingService;
 @Private
 public class RpcServerFactoryPBImpl implements RpcServerFactory {
 
-  private static final Log LOG = LogFactory.getLog(RpcServerFactoryPBImpl.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(RpcServerFactoryPBImpl.class);
   private static final String PROTO_GEN_PACKAGE_NAME = "org.apache.hadoop.yarn.proto";
   private static final String PROTO_GEN_CLASS_SUFFIX = "Service";
   private static final String PB_IMPL_PACKAGE_SUFFIX = "impl.pb.service";
@@ -51,7 +52,6 @@ public class RpcServerFactoryPBImpl implements RpcServerFactory {
   
   private static final RpcServerFactoryPBImpl self = new RpcServerFactoryPBImpl();
 
-  private Configuration localConf = new Configuration();
   private ConcurrentMap<Class<?>, Constructor<?>> serviceCache = new ConcurrentHashMap<Class<?>, Constructor<?>>();
   private ConcurrentMap<Class<?>, Method> protoCache = new ConcurrentHashMap<Class<?>, Method>();
   
@@ -80,7 +80,7 @@ public class RpcServerFactoryPBImpl implements RpcServerFactory {
     if (constructor == null) {
       Class<?> pbServiceImplClazz = null;
       try {
-        pbServiceImplClazz = localConf
+        pbServiceImplClazz = conf
             .getClassByName(getPbServiceImplClassName(protocol));
       } catch (ClassNotFoundException e) {
         throw new YarnRuntimeException("Failed to load class: ["
@@ -113,7 +113,7 @@ public class RpcServerFactoryPBImpl implements RpcServerFactory {
     if (method == null) {
       Class<?> protoClazz = null;
       try {
-        protoClazz = localConf.getClassByName(getProtoClassName(protocol));
+        protoClazz = conf.getClassByName(getProtoClassName(protocol));
       } catch (ClassNotFoundException e) {
         throw new YarnRuntimeException("Failed to load class: ["
             + getProtoClassName(protocol) + "]", e);

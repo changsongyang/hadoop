@@ -24,8 +24,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -53,6 +51,8 @@ import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.DefaultContainerExecutor;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Configures and starts the MR-specific components in the YARN cluster.
@@ -64,7 +64,8 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
 
   public static final String APPJAR = JarFinder.getJar(LocalContainerLauncher.class);
 
-  private static final Log LOG = LogFactory.getLog(MiniMRYarnCluster.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(MiniMRYarnCluster.class);
   private JobHistoryServer historyServer;
   private JobHistoryServerWrapper historyServerWrapper;
   private static final String TIMELINE_AUX_SERVICE_NAME = "timeline_collector";
@@ -118,7 +119,9 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
   @Override
   public void serviceInit(Configuration conf) throws Exception {
     conf.set(MRConfig.FRAMEWORK_NAME, MRConfig.YARN_FRAMEWORK_NAME);
-    if (conf.get(MRJobConfig.MR_AM_STAGING_DIR) == null) {
+    String stagingDir = conf.get(MRJobConfig.MR_AM_STAGING_DIR);
+    if (stagingDir == null ||
+        stagingDir.equals(MRJobConfig.DEFAULT_MR_AM_STAGING_DIR)) {
       conf.set(MRJobConfig.MR_AM_STAGING_DIR, new File(getTestWorkDir(),
           "apps_staging_dir/").getAbsolutePath());
     }

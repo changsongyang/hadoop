@@ -25,6 +25,8 @@ import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -34,6 +36,7 @@ import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.Options.ChecksumOpt;
+import org.apache.hadoop.fs.Options.HandleOpt;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.util.Progressable;
@@ -161,6 +164,17 @@ public class FilterFileSystem extends FileSystem {
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
     return fs.open(f, bufferSize);
+  }
+
+  @Override
+  public FSDataInputStream open(PathHandle fd, int bufferSize)
+      throws IOException {
+    return fs.open(fd, bufferSize);
+  }
+
+  @Override
+  protected PathHandle createPathHandle(FileStatus stat, HandleOpt... opts) {
+    return fs.getPathHandle(stat, opts);
   }
 
   @Override
@@ -320,6 +334,10 @@ public class FilterFileSystem extends FileSystem {
     return fs.mkdirs(f, permission);
   }
 
+  @Override
+  public boolean mkdirs(Path f) throws IOException {
+    return fs.mkdirs(f);
+  }
 
   /**
    * The src file is on the local disk.  Add it to FS at
@@ -634,6 +652,11 @@ public class FilterFileSystem extends FileSystem {
   }
 
   @Override
+  public void satisfyStoragePolicy(Path src) throws IOException {
+    fs.satisfyStoragePolicy(src);
+  }
+
+  @Override
   public void setStoragePolicy(Path src, String policyName)
       throws IOException {
     fs.setStoragePolicy(src, policyName);
@@ -665,4 +688,52 @@ public class FilterFileSystem extends FileSystem {
   public Collection<FileStatus> getTrashRoots(boolean allUsers) {
     return fs.getTrashRoots(allUsers);
   }
+
+  @Override
+  public FSDataOutputStreamBuilder createFile(Path path) {
+    return fs.createFile(path);
+  }
+
+  @Override
+  public FSDataOutputStreamBuilder appendFile(Path path) {
+    return fs.appendFile(path);
+  }
+
+  @Override
+  public FutureDataInputStreamBuilder openFile(final Path path)
+      throws IOException, UnsupportedOperationException {
+    return fs.openFile(path);
+  }
+
+  @Override
+  public FutureDataInputStreamBuilder openFile(final PathHandle pathHandle)
+      throws IOException, UnsupportedOperationException {
+    return fs.openFile(pathHandle);
+  }
+
+  @Override
+  protected CompletableFuture<FSDataInputStream> openFileWithOptions(
+      final Path path,
+      final Set<String> mandatoryKeys,
+      final Configuration options,
+      final int bufferSize) throws IOException {
+    return fs.openFileWithOptions(path, mandatoryKeys, options, bufferSize);
+  }
+
+  @Override
+  protected CompletableFuture<FSDataInputStream> openFileWithOptions(
+      final PathHandle pathHandle,
+      final Set<String> mandatoryKeys,
+      final Configuration options,
+      final int bufferSize) throws IOException {
+    return fs.openFileWithOptions(pathHandle, mandatoryKeys, options,
+        bufferSize);
+  }
+
+  @Override
+  public boolean hasPathCapability(final Path path, final String capability)
+      throws IOException {
+    return fs.hasPathCapability(path, capability);
+  }
+
 }

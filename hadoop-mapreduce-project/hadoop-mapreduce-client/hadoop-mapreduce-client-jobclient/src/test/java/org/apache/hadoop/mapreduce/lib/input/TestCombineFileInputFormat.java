@@ -62,6 +62,7 @@ import org.mockito.MockitoAnnotations;
 
 import com.google.common.collect.HashMultiset;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -154,7 +155,7 @@ public class TestCombineFileInputFormat {
     @Override
     public BlockLocation[] getFileBlockLocations(
         FileStatus stat, long start, long len) throws IOException {
-      if (stat.isDir()) {
+      if (stat.isDirectory()) {
         return null;
       }
       System.out.println("File " + stat.getPath());
@@ -1661,7 +1662,7 @@ public class TestCombineFileInputFormat {
       for (InputSplit split : splits) {
         System.out.println("File split(Test0): " + split);
       }
-      assertEquals(splits.size(), 1);
+      assertThat(splits.size()).isEqualTo(1);
       CombineFileSplit fileSplit = (CombineFileSplit) splits.get(0);
       assertEquals(2, fileSplit.getNumPaths());
       assertEquals(1, fileSplit.getLocations().length);
@@ -1788,7 +1789,7 @@ public class TestCombineFileInputFormat {
     for (InputSplit s : splits) {
       CombineFileSplit cfs = (CombineFileSplit)s;
       for (Path p : cfs.getPaths()) {
-        assertEquals(p.toUri().getScheme(), "file");
+        assertThat(p.toUri().getScheme()).isEqualTo("file");
       }
     }
   }

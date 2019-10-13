@@ -47,7 +47,6 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.namenode.ErasureCodingPolicyManager;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
@@ -83,7 +82,7 @@ public class TestDecommissionWithStriped {
   private MiniDFSCluster cluster;
   private DistributedFileSystem dfs;
   private final ErasureCodingPolicy ecPolicy =
-      ErasureCodingPolicyManager.getSystemDefaultPolicy();
+      StripedFileTestUtil.getDefaultECPolicy();
   private int numDNs;
   private final int cellSize = ecPolicy.getCellSize();
   private final int dataBlocks = ecPolicy.getNumDataUnits();
@@ -141,8 +140,11 @@ public class TestDecommissionWithStriped {
     bm = fsn.getBlockManager();
     client = getDfsClient(cluster.getNameNode(0), conf);
 
+    dfs.enableErasureCodingPolicy(
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     dfs.mkdirs(ecDir);
-    dfs.setErasureCodingPolicy(ecDir, null);
+    dfs.setErasureCodingPolicy(ecDir,
+        StripedFileTestUtil.getDefaultECPolicy().getName());
   }
 
   @After
@@ -241,8 +243,8 @@ public class TestDecommissionWithStriped {
         }
       };
     };
-    int deadDecomissioned = fsn.getNumDecomDeadDataNodes();
-    int liveDecomissioned = fsn.getNumDecomLiveDataNodes();
+    int deadDecommissioned = fsn.getNumDecomDeadDataNodes();
+    int liveDecommissioned = fsn.getNumDecomLiveDataNodes();
     decomTh.start();
     decomStarted.await(5, TimeUnit.SECONDS);
     Thread.sleep(3000); // grace period to trigger decommissioning call
@@ -258,8 +260,8 @@ public class TestDecommissionWithStriped {
     decomTh.join(20000); // waiting 20secs to finish decommission
     LOG.info("Finished decommissioning node:{}", decommisionNodes);
 
-    assertEquals(deadDecomissioned, fsn.getNumDecomDeadDataNodes());
-    assertEquals(liveDecomissioned + decommisionNodes.size(),
+    assertEquals(deadDecommissioned, fsn.getNumDecomDeadDataNodes());
+    assertEquals(liveDecommissioned + decommisionNodes.size(),
         fsn.getNumDecomLiveDataNodes());
 
     // Ensure decommissioned datanode is not automatically shutdown
@@ -326,8 +328,8 @@ public class TestDecommissionWithStriped {
     List<DatanodeInfo> decommisionNodes = getDecommissionDatanode(dfs, ecFile,
         writeBytes, decomNodeCount);
 
-    int deadDecomissioned = fsn.getNumDecomDeadDataNodes();
-    int liveDecomissioned = fsn.getNumDecomLiveDataNodes();
+    int deadDecommissioned = fsn.getNumDecomDeadDataNodes();
+    int liveDecommissioned = fsn.getNumDecomLiveDataNodes();
     List<LocatedBlock> lbs = ((HdfsDataInputStream) dfs.open(ecFile))
         .getAllBlocks();
 
@@ -340,8 +342,8 @@ public class TestDecommissionWithStriped {
     // Decommission node. Verify that node is decommissioned.
     decommissionNode(0, decommisionNodes, AdminStates.DECOMMISSIONED);
 
-    assertEquals(deadDecomissioned, fsn.getNumDecomDeadDataNodes());
-    assertEquals(liveDecomissioned + decommisionNodes.size(),
+    assertEquals(deadDecommissioned, fsn.getNumDecomDeadDataNodes());
+    assertEquals(liveDecommissioned + decommisionNodes.size(),
         fsn.getNumDecomLiveDataNodes());
 
     // Ensure decommissioned datanode is not automatically shutdown

@@ -21,9 +21,9 @@ package org.apache.hadoop.hdfs.server.datanode;
 import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +37,7 @@ import org.apache.hadoop.hdfs.server.datanode.BlockScanner.Conf;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi.BlockIterator;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
+import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.Time;
@@ -44,8 +45,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * VolumeScanner scans a single volume.  Each VolumeScanner has its own thread.<p/>
- * They are all managed by the DataNode's BlockScanner.
+ * VolumeScanner scans a single volume.  Each VolumeScanner has its own thread.
+ * <p>They are all managed by the DataNode's BlockScanner.
  */
 public class VolumeScanner extends Thread {
   public static final Logger LOG =
@@ -80,6 +81,8 @@ public class VolumeScanner extends Thread {
    * The DataNode this VolumEscanner is associated with.
    */
   private final DataNode datanode;
+
+  private final DataNodeMetrics metrics;
 
   /**
    * A reference to the volume that we're scanning.
@@ -122,7 +125,7 @@ public class VolumeScanner extends Thread {
    * Each block pool has its own BlockIterator.
    */
   private final List<BlockIterator> blockIters =
-      new LinkedList<BlockIterator>();
+      new ArrayList<BlockIterator>();
 
   /**
    * Blocks which are suspect.
@@ -225,15 +228,15 @@ public class VolumeScanner extends Thread {
         " path %s%n", volume.getStorageID(), volume));
     synchronized (stats) {
       p.append(String.format("Bytes verified in last hour       : %57d%n",
-          stats.bytesScannedInPastHour));
-      p.append(String.format("Blocks scanned in current period  : %57d%n",
-          stats.blocksScannedInCurrentPeriod));
-      p.append(String.format("Blocks scanned since restart      : %57d%n",
-          stats.blocksScannedSinceRestart));
-      p.append(String.format("Block pool scans since restart    : %57d%n",
-          stats.scansSinceRestart));
-      p.append(String.format("Block scan errors since restart   : %57d%n",
-          stats.scanErrorsSinceRestart));
+          stats.bytesScannedInPastHour))
+          .append(String.format("Blocks scanned in current period  : %57d%n",
+              stats.blocksScannedInCurrentPeriod))
+          .append(String.format("Blocks scanned since restart      : %57d%n",
+              stats.blocksScannedSinceRestart))
+          .append(String.format("Block pool scans since restart    : %57d%n",
+              stats.scansSinceRestart))
+          .append(String.format("Block scan errors since restart   : %57d%n",
+              stats.scanErrorsSinceRestart));
       if (stats.nextBlockPoolScanStartMs > 0) {
         p.append(String.format("Hours until next block pool scan  : %57.3f%n",
             positiveMsToHours(stats.nextBlockPoolScanStartMs -
@@ -287,18 +290,14 @@ public class VolumeScanner extends Thread {
         return;
       }
       LOG.warn("Reporting bad {} on {}", block, volume);
-      try {
-        scanner.datanode.reportBadBlocks(block, volume);
-      } catch (IOException ie) {
-        // This is bad, but not bad enough to shut down the scanner.
-        LOG.warn("Cannot report bad block " + block, ie);
-      }
+      scanner.datanode.handleBadBlock(block, e, true);
     }
   }
 
   VolumeScanner(Conf conf, DataNode datanode, FsVolumeReference ref) {
     this.conf = conf;
     this.datanode = datanode;
+    this.metrics = datanode.getMetrics();
     this.ref = ref;
     this.volume = ref.getVolume();
     ScanResultHandler handler;
@@ -443,12 +442,14 @@ public class VolumeScanner extends Thread {
       throttler.setBandwidth(bytesPerSec);
       long bytesRead = blockSender.sendBlock(nullStream, null, throttler);
       resultHandler.handle(block, null);
+      metrics.incrBlocksVerified();
       return bytesRead;
     } catch (IOException e) {
       resultHandler.handle(block, e);
     } finally {
       IOUtils.cleanup(null, blockSender);
     }
+    metrics.incrBlockVerificationFailures();
     return -1;
   }
 

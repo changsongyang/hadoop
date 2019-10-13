@@ -20,9 +20,8 @@ import DS from 'ember-data';
 import Converter from 'yarn-ui/utils/converter';
 
 export default DS.JSONAPISerializer.extend({
-    internalNormalizeSingleResponse(store, primaryModelClass, payload, id,
-      requestType) {
-      
+    internalNormalizeSingleResponse(store, primaryModelClass, payload) {
+
       var fixedPayload = {
         id: payload.containerId,
         type: primaryModelClass.modelName, // yarn-app
@@ -35,24 +34,24 @@ export default DS.JSONAPISerializer.extend({
           finishedTime: Converter.timeStampToDate(payload.finishedTime),
           elapsedTime: payload.elapsedTime,
           logUrl: payload.logUrl,
-          containerExitStatus: payload.containerExitStatus,
+          containerExitStatus: payload.containerExitStatus + '',
           containerState: payload.containerState,
-          nodeHttpAddress: payload.nodeHttpAddress
+          nodeId : payload.nodeId,
+          nodeHttpAddress: payload.nodeHttpAddress,
+          exposedPorts: payload.exposedPorts
         }
       };
 
       return fixedPayload;
     },
 
-    normalizeSingleResponse(store, primaryModelClass, payload, id,
-      requestType) {
-      var p = this.internalNormalizeSingleResponse(store, 
-        primaryModelClass, payload, id, requestType);
+    normalizeSingleResponse(store, primaryModelClass, payload/*, id, requestType*/) {
+      var p = this.internalNormalizeSingleResponse(store,
+        primaryModelClass, payload);
       return { data: p };
     },
 
-    normalizeArrayResponse(store, primaryModelClass, payload, id,
-      requestType) {
+    normalizeArrayResponse(store, primaryModelClass, payload/*, id, requestType*/) {
       // return expected is { data: [ {}, {} ] }
       var normalizedArrayResponse = {};
 
@@ -62,12 +61,11 @@ export default DS.JSONAPISerializer.extend({
           // need some error handling for ex apps or app may not be defined.
           normalizedArrayResponse.data = payload.container.map(singleContainer => {
             return this.internalNormalizeSingleResponse(store, primaryModelClass,
-              singleContainer, singleContainer.id, requestType);
+              singleContainer);
           }, this);
         } else {
           normalizedArrayResponse.data = [this.internalNormalizeSingleResponse(
-            store, primaryModelClass, payload.container, payload.container.id,
-            requestType)];
+            store, primaryModelClass, payload.container)];
         }
         return normalizedArrayResponse;
       } else {

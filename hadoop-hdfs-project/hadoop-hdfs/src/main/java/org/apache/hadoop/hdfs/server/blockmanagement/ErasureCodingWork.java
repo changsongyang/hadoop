@@ -44,7 +44,7 @@ class ErasureCodingWork extends BlockReconstructionWork {
         liveReplicaStorages, additionalReplRequired, priority);
     this.blockPoolId = blockPoolId;
     this.liveBlockIndicies = liveBlockIndicies;
-    BlockManager.LOG.debug("Creating an ErasureCodingWork to {} reconstruct ",
+    LOG.debug("Creating an ErasureCodingWork to {} reconstruct ",
         block);
   }
 
@@ -58,10 +58,9 @@ class ErasureCodingWork extends BlockReconstructionWork {
       Set<Node> excludedNodes) {
     // TODO: new placement policy for EC considering multiple writers
     DatanodeStorageInfo[] chosenTargets = blockplacement.chooseTarget(
-        getBc().getName(), getAdditionalReplRequired(), getSrcNodes()[0],
-        getLiveReplicaStorages(), false, excludedNodes,
-        getBlock().getNumBytes(),
-        storagePolicySuite.getPolicy(getBc().getStoragePolicyID()), null);
+        getSrcPath(), getAdditionalReplRequired(), getSrcNodes()[0],
+        getLiveReplicaStorages(), false, excludedNodes, getBlockSize(),
+        storagePolicySuite.getPolicy(getStoragePolicyID()), null);
     setTargets(chosenTargets);
   }
 
@@ -158,10 +157,8 @@ class ErasureCodingWork extends BlockReconstructionWork {
         internBlkLen, stripedBlk.getGenerationStamp());
     source.addBlockToBeReplicated(targetBlk,
         new DatanodeStorageInfo[] {target});
-    if (BlockManager.LOG.isDebugEnabled()) {
-      BlockManager.LOG.debug("Add replication task from source {} to "
-          + "target {} for EC block {}", source, target, targetBlk);
-    }
+    LOG.debug("Add replication task from source {} to "
+        + "target {} for EC block {}", source, target, targetBlk);
   }
 
   private List<Integer> findLeavingServiceSources() {

@@ -29,7 +29,6 @@ import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.net.NetworkTopology;
-import org.apache.hadoop.net.ServerSocketUtil;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
@@ -40,16 +39,16 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
+import org.apache.hadoop.yarn.api.records.ContainerUpdateType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.SchedulingRequest;
 import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.client.api.AMRMClient;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
@@ -94,6 +93,7 @@ public class TestAMRMClientOnRMRestart {
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
     conf.setBoolean(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_ENABLED, true);
     conf.setLong(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_SCHEDULING_WAIT_MS, 0);
+    conf.set(YarnConfiguration.RM_SCHEDULER_ADDRESS, "0.0.0.0:0");
   }
 
   @AfterClass
@@ -125,22 +125,20 @@ public class TestAMRMClientOnRMRestart {
     // Phase-1 Start 1st RM
     MyResourceManager rm1 = new MyResourceManager(conf, memStore);
     rm1.start();
-    DrainDispatcher dispatcher =
-        (DrainDispatcher) rm1.getRMContext().getDispatcher();
 
     // Submit the application
     RMApp app = rm1.submitApp(1024);
-    dispatcher.await();
+    rm1.drainEvents();
 
     MockNM nm1 = new MockNM("h1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
     nm1.nodeHeartbeat(true); // Node heartbeat
-    dispatcher.await();
+    rm1.drainEvents();
 
     ApplicationAttemptId appAttemptId =
         app.getCurrentAppAttempt().getAppAttemptId();
     rm1.sendAMLaunched(appAttemptId);
-    dispatcher.await();
+    rm1.drainEvents();
 
     org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> token =
         rm1.getRMContext().getRMApps().get(appAttemptId.getApplicationId())
@@ -175,7 +173,7 @@ public class TestAMRMClientOnRMRestart {
     blacklistAdditions.remove("h2");// remove from local list
 
     AllocateResponse allocateResponse = amClient.allocate(0.1f);
-    dispatcher.await();
+    rm1.drainEvents();
     Assert.assertEquals("No of assignments must be 0", 0, allocateResponse
         .getAllocatedContainers().size());
 
@@ -188,10 +186,10 @@ public class TestAMRMClientOnRMRestart {
     // Step-2 : NM heart beat is sent.
     // On 2nd AM allocate request, RM allocates 3 containers to AM
     nm1.nodeHeartbeat(true); // Node heartbeat
-    dispatcher.await();
+    rm1.drainEvents();
 
     allocateResponse = amClient.allocate(0.2f);
-    dispatcher.await();
+    rm1.drainEvents();
     // 3 containers are allocated i.e for cRequest1, cRequest2 and cRequest3.
     Assert.assertEquals("No of assignments must be 0", 3, allocateResponse
         .getAllocatedContainers().size());
@@ -206,7 +204,7 @@ public class TestAMRMClientOnRMRestart {
     amClient.removeContainerRequest(cRequest3);
 
     allocateResponse = amClient.allocate(0.2f);
-    dispatcher.await();
+    rm1.drainEvents();
     Assert.assertEquals("No of assignments must be 0", 0, allocateResponse
         .getAllocatedContainers().size());
     assertAsksAndReleases(4, 0, rm1);
@@ -232,13 +230,16 @@ public class TestAMRMClientOnRMRestart {
     // request
     nm1.nodeHeartbeat(containerId.getApplicationAttemptId(),
         containerId.getContainerId(), ContainerState.RUNNING);
-    dispatcher.await();
-    amClient.requestContainerResourceChange(
-        container, Resource.newInstance(2048, 1));
+    rm1.drainEvents();
+    amClient.requestContainerUpdate(
+        container, UpdateContainerRequest.newInstance(
+            container.getVersion(), container.getId(),
+            ContainerUpdateType.INCREASE_RESOURCE,
+            Resource.newInstance(2048, 1), null));
     it.remove();
 
     allocateResponse = amClient.allocate(0.3f);
-    dispatcher.await();
+    rm1.drainEvents();
     Assert.assertEquals("No of assignments must be 0", 0, allocateResponse
         .getAllocatedContainers().size());
     assertAsksAndReleases(3, pendingRelease, rm1);
@@ -254,7 +255,6 @@ public class TestAMRMClientOnRMRestart {
     rm2.start();
     nm1.setResourceTrackerService(rm2.getResourceTrackerService());
     ((MyAMRMClientImpl) amClient).updateRMProxy(rm2);
-    dispatcher = (DrainDispatcher) rm2.getRMContext().getDispatcher();
 
     // NM should be rebooted on heartbeat, even first heartbeat for nm2
     NodeHeartbeatResponse hbResponse = nm1.nodeHeartbeat(true);
@@ -270,7 +270,7 @@ public class TestAMRMClientOnRMRestart {
         Collections.singletonList(
             containerId.getApplicationAttemptId().getApplicationId()));
     nm1.nodeHeartbeat(true);
-    dispatcher.await();
+    rm2.drainEvents();
 
     blacklistAdditions.add("h3");
     amClient.updateBlacklist(blacklistAdditions, null);
@@ -292,7 +292,7 @@ public class TestAMRMClientOnRMRestart {
     // containerRequest and blacklisted nodes.
     // Intern RM send resync command,AMRMClient resend allocate request
     allocateResponse = amClient.allocate(0.3f);
-    dispatcher.await();
+    rm2.drainEvents();
 
     completedContainer =
         allocateResponse.getCompletedContainersStatuses().size();
@@ -309,7 +309,7 @@ public class TestAMRMClientOnRMRestart {
 
     // Step-5 : Allocater after resync command
     allocateResponse = amClient.allocate(0.5f);
-    dispatcher.await();
+    rm2.drainEvents();
     Assert.assertEquals("No of assignments must be 0", 0, allocateResponse
         .getAllocatedContainers().size());
 
@@ -322,10 +322,10 @@ public class TestAMRMClientOnRMRestart {
     int count = 5;
     while (count-- > 0) {
       nm1.nodeHeartbeat(true);
-      dispatcher.await();
+      rm2.drainEvents();
 
       allocateResponse = amClient.allocate(0.5f);
-      dispatcher.await();
+      rm2.drainEvents();
       noAssignedContainer += allocateResponse.getAllocatedContainers().size();
       if (noAssignedContainer == 3) {
         break;
@@ -354,22 +354,20 @@ public class TestAMRMClientOnRMRestart {
     // Phase-1 Start 1st RM
     MyResourceManager rm1 = new MyResourceManager(conf, memStore);
     rm1.start();
-    DrainDispatcher dispatcher =
-        (DrainDispatcher) rm1.getRMContext().getDispatcher();
 
     // Submit the application
     RMApp app = rm1.submitApp(1024);
-    dispatcher.await();
+    rm1.drainEvents();
 
     MockNM nm1 = new MockNM("h1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
     nm1.nodeHeartbeat(true); // Node heartbeat
-    dispatcher.await();
+    rm1.drainEvents();
 
     ApplicationAttemptId appAttemptId =
         app.getCurrentAppAttempt().getAppAttemptId();
     rm1.sendAMLaunched(appAttemptId);
-    dispatcher.await();
+    rm1.drainEvents();
 
     org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> token =
         rm1.getRMContext().getRMApps().get(appAttemptId.getApplicationId())
@@ -389,7 +387,6 @@ public class TestAMRMClientOnRMRestart {
     rm2.start();
     nm1.setResourceTrackerService(rm2.getResourceTrackerService());
     ((MyAMRMClientImpl) amClient).updateRMProxy(rm2);
-    dispatcher = (DrainDispatcher) rm2.getRMContext().getDispatcher();
 
     // NM should be rebooted on heartbeat, even first heartbeat for nm2
     NodeHeartbeatResponse hbResponse = nm1.nodeHeartbeat(true);
@@ -405,7 +402,7 @@ public class TestAMRMClientOnRMRestart {
             Priority.newInstance(0), 0);
     nm1.registerNode(Arrays.asList(containerReport), null);
     nm1.nodeHeartbeat(true);
-    dispatcher.await();
+    rm2.drainEvents();
 
     amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
         null, null);
@@ -417,7 +414,6 @@ public class TestAMRMClientOnRMRestart {
     amClient.stop();
     rm1.stop();
     rm2.stop();
-
   }
 
 
@@ -435,22 +431,20 @@ public class TestAMRMClientOnRMRestart {
     // start first RM
     MyResourceManager2 rm1 = new MyResourceManager2(conf, memStore);
     rm1.start();
-    DrainDispatcher dispatcher =
-        (DrainDispatcher) rm1.getRMContext().getDispatcher();
     Long startTime = System.currentTimeMillis();
     // Submit the application
     RMApp app = rm1.submitApp(1024);
-    dispatcher.await();
+    rm1.drainEvents();
 
     MockNM nm1 = new MockNM("h1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
     nm1.nodeHeartbeat(true); // Node heartbeat
-    dispatcher.await();
+    rm1.drainEvents();
 
     ApplicationAttemptId appAttemptId =
         app.getCurrentAppAttempt().getAppAttemptId();
     rm1.sendAMLaunched(appAttemptId);
-    dispatcher.await();
+    rm1.drainEvents();
 
     AMRMTokenSecretManager amrmTokenSecretManagerForRM1 =
         rm1.getRMContext().getAMRMTokenSecretManager();
@@ -503,13 +497,10 @@ public class TestAMRMClientOnRMRestart {
       .getMasterKey().getKeyId() == newToken.decodeIdentifier().getKeyId());
 
     // start 2nd RM
-    conf.set(YarnConfiguration.RM_SCHEDULER_ADDRESS, "0.0.0.0:"
-        + ServerSocketUtil.getPort(45020, 10));
     final MyResourceManager2 rm2 = new MyResourceManager2(conf, memStore);
     rm2.start();
     nm1.setResourceTrackerService(rm2.getResourceTrackerService());
     ((MyAMRMClientImpl) amClient).updateRMProxy(rm2);
-    dispatcher = (DrainDispatcher) rm2.getRMContext().getDispatcher();
 
     AMRMTokenSecretManager amrmTokenSecretManagerForRM2 =
         rm2.getRMContext().getAMRMTokenSecretManager();
@@ -555,6 +546,7 @@ public class TestAMRMClientOnRMRestart {
       super();
       try {
         Configuration conf = new Configuration();
+        init(conf);
         reinitialize(conf, rmContext);
       } catch (IOException ie) {
         assert (false);
@@ -573,16 +565,12 @@ public class TestAMRMClientOnRMRestart {
     @Override
     public synchronized Allocation allocate(
         ApplicationAttemptId applicationAttemptId, List<ResourceRequest> ask,
-        List<ContainerId> release, List<String> blacklistAdditions,
-        List<String> blacklistRemovals,
+        List<SchedulingRequest> schedulingRequests, List<ContainerId> release,
+        List<String> blacklistAdditions, List<String> blacklistRemovals,
         ContainerUpdates updateRequests) {
       List<ResourceRequest> askCopy = new ArrayList<ResourceRequest>();
       for (ResourceRequest req : ask) {
-        ResourceRequest reqCopy =
-            ResourceRequest.newInstance(req.getPriority(),
-                req.getResourceName(), req.getCapability(),
-                req.getNumContainers(), req.getRelaxLocality());
-        askCopy.add(reqCopy);
+        askCopy.add(ResourceRequest.clone(req));
       }
       lastAsk = ask;
       lastRelease = release;
@@ -590,7 +578,8 @@ public class TestAMRMClientOnRMRestart {
       lastDecrease = updateRequests.getDecreaseRequests();
       lastBlacklistAdditions = blacklistAdditions;
       lastBlacklistRemovals = blacklistRemovals;
-      return super.allocate(applicationAttemptId, askCopy, release,
+      return super.allocate(applicationAttemptId, askCopy, schedulingRequests,
+          release,
           blacklistAdditions, blacklistRemovals, updateRequests);
     }
   }
@@ -609,11 +598,6 @@ public class TestAMRMClientOnRMRestart {
       // Ensure that the application attempt IDs for all the tests are the same
       // The application attempt IDs will be used as the login user names
       MyResourceManager.setClusterTimeStamp(fakeClusterTimeStamp);
-    }
-
-    @Override
-    protected Dispatcher createDispatcher() {
-      return new DrainDispatcher();
     }
 
     @Override

@@ -18,14 +18,12 @@
 package org.apache.hadoop.util;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileWriter;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Set;
+import java.nio.file.NoSuchFileException;
 import java.util.Map;
 
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.HostsFileReader.HostDetails;
 import org.junit.*;
 
 import static org.junit.Assert.*;
@@ -121,11 +119,11 @@ public class TestHostsFileReader {
     assertTrue(hfp.getExcludedHosts().contains("node1"));
     assertTrue(hfp.getHosts().contains("node2"));
 
-    Set<String> hostsList = new HashSet<String>();
-    Set<String> excludeList = new HashSet<String>();
-    hfp.getHostDetails(hostsList, excludeList);
-    assertTrue(excludeList.contains("node1"));
-    assertTrue(hostsList.contains("node2"));
+    HostDetails hostDetails = hfp.getHostDetails();
+    assertTrue(hostDetails.getExcludedHosts().contains("node1"));
+    assertTrue(hostDetails.getIncludedHosts().contains("node2"));
+    assertEquals(newIncludesFile, hostDetails.getIncludesFile());
+    assertEquals(newExcludesFile, hostDetails.getExcludesFile());
   }
 
   /*
@@ -137,8 +135,8 @@ public class TestHostsFileReader {
       new HostsFileReader(
           HOSTS_TEST_DIR + "/doesnt-exist",
           HOSTS_TEST_DIR + "/doesnt-exist");
-      Assert.fail("Should throw FileNotFoundException");
-    } catch (FileNotFoundException ex) {
+      Assert.fail("Should throw NoSuchFileException");
+    } catch (NoSuchFileException ex) {
       // Exception as expected
     }
   }
@@ -159,8 +157,8 @@ public class TestHostsFileReader {
     assertTrue(INCLUDES_FILE.delete());
     try {
       hfp.refresh();
-      Assert.fail("Should throw FileNotFoundException");
-    } catch (FileNotFoundException ex) {
+      Assert.fail("Should throw NoSuchFileException");
+    } catch (NoSuchFileException ex) {
       // Exception as expected
     }
   }
@@ -328,9 +326,8 @@ public class TestHostsFileReader {
     assertEquals(4, includesLen);
     assertEquals(9, excludesLen);
 
-    Set<String> includes = new HashSet<String>();
-    Map<String, Integer> excludes = new HashMap<String, Integer>();
-    hfp.getHostDetails(includes, excludes);
+    HostDetails hostDetails = hfp.getHostDetails();
+    Map<String, Integer> excludes = hostDetails.getExcludedMap();
     assertTrue(excludes.containsKey("host1"));
     assertTrue(excludes.containsKey("host2"));
     assertTrue(excludes.containsKey("host3"));

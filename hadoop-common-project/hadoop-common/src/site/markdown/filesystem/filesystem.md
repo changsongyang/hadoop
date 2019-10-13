@@ -86,11 +86,26 @@ Get the status of a path
             stat.length = 0
             stat.isdir = False
             stat.symlink = FS.Symlinks[p]
-        if inEncryptionZone(FS, p) :
-            stat.isEncrypted = True
-        else
-            stat.isEncrypted = False
+        stat.hasAcl = hasACL(FS, p)
+        stat.isEncrypted = inEncryptionZone(FS, p)
+        stat.isErasureCoded = isErasureCoded(FS, p)
 
+The returned `FileStatus` status of the path additionally carries details on
+ACL, encryption and erasure coding information. `getFileStatus(Path p).hasAcl()`
+can be queried to find if the path has an ACL. `getFileStatus(Path p).isEncrypted()`
+can be queried to find if the path is encrypted. `getFileStatus(Path p).isErasureCoded()`
+will tell if the path is erasure coded or not.
+
+YARN's distributed cache lets applications add paths to be cached across
+containers and applications via `Job.addCacheFile()` and `Job.addCacheArchive()`.
+The cache treats world-readable resources paths added as shareable across
+applications, and downloads them differently, unless they are declared as encrypted.
+
+To avoid failures during container launching, especially when delegation tokens
+are used, filesystems and object stores which not implement POSIX access permissions
+for both files and directories, MUST always return `true` to the `isEncrypted()`
+predicate. This can be done by setting the `encrypted` flag to true when creating
+the `FileStatus` instance.
 
 ### `Path getHomeDirectory()`
 
@@ -205,21 +220,21 @@ directory contains many thousands of files.
 
 Consider a directory `"/d"` with the contents:
 
-	a
-	part-0000001
-	part-0000002
-	...
-	part-9999999
+    a
+    part-0000001
+    part-0000002
+    ...
+    part-9999999
 
 
 If the number of files is such that HDFS returns a partial listing in each
 response, then, if a listing `listStatus("/d")` takes place concurrently with the operation
 `rename("/d/a","/d/z"))`, the result may be one of:
 
-	[a, part-0000001, ... , part-9999999]
-	[part-0000001, ... , part-9999999, z]
-	[a, part-0000001, ... , part-9999999, z]
-	[part-0000001, ... , part-9999999]
+    [a, part-0000001, ... , part-9999999]
+    [part-0000001, ... , part-9999999, z]
+    [a, part-0000001, ... , part-9999999, z]
+    [part-0000001, ... , part-9999999]
 
 While this situation is likely to be a rare occurrence, it MAY happen. In HDFS
 these inconsistent views are only likely when listing a directory with many children.
@@ -511,7 +526,7 @@ on the filesystem.
    `getFileStatus(P).getBlockSize()`.
 1. By inference, it MUST be > 0 for any file of length > 0.
 
-## State Changing Operations
+## <a name="state_changing_operations"></a> State Changing Operations
 
 ### `boolean mkdirs(Path p, FsPermission permission)`
 
@@ -540,16 +555,7 @@ atomic. The combined operation, including `mkdirs(parent(F))` MAY be atomic.
 The return value is always true&mdash;even if a new directory is not created
  (this is defined in HDFS).
 
-#### Implementation Notes: Local FileSystem
-
-The local FileSystem does not raise an exception if `mkdirs(p)` is invoked
-on a path that exists and is a file. Instead the operation returns false.
-
-    if isFile(FS, p):
-       FS' = FS
-       result = False
-
-### `FSDataOutputStream create(Path, ...)`
+### <a name='FileSystem.create'></a> `FSDataOutputStream create(Path, ...)`
 
 
     FSDataOutputStream create(Path p,
@@ -601,7 +607,7 @@ The result is `FSDataOutputStream`, which through its operations may generate ne
  clients creating files with `overwrite==true` to fail if the file is created
  by another client between the two tests.
 
-* S3N, S3A, Swift and potentially other Object Stores do not currently change the FS state
+* S3A, Swift and potentially other Object Stores do not currently change the FS state
 until the output stream `close()` operation is completed.
 This MAY be a bug, as it allows >1 client to create a file with `overwrite==false`,
  and potentially confuse file/directory logic
@@ -612,7 +618,24 @@ this precondition fails.
 
 * Not covered: symlinks. The resolved path of the symlink is used as the final path argument to the `create()` operation
 
-### `FSDataOutputStream append(Path p, int bufferSize, Progressable progress)`
+### `FSDataOutputStreamBuilder createFile(Path p)`
+
+Make a `FSDataOutputStreamBuilder` to specify the parameters to create a file.
+
+#### Implementation Notes
+
+`createFile(p)` returns a `FSDataOutputStreamBuilder` only and does not make
+change on filesystem immediately. When `build()` is invoked on the `FSDataOutputStreamBuilder`,
+the builder parameters are verified and [`create(Path p)`](#FileSystem.create)
+is invoked on the underlying filesystem. `build()` has the same preconditions
+and postconditions as [`create(Path p)`](#FileSystem.create).
+
+* Similar to [`create(Path p)`](#FileSystem.create), files are overwritten
+by default, unless specify `builder.overwrite(false)`.
+* Unlike [`create(Path p)`](#FileSystem.create), missing parent directories are
+not created by default, unless specify `builder.recursive()`.
+
+### <a name='FileSystem.append'></a> `FSDataOutputStream append(Path p, int bufferSize, Progressable progress)`
 
 Implementations without a compliant call SHOULD throw `UnsupportedOperationException`.
 
@@ -620,7 +643,7 @@ Implementations without a compliant call SHOULD throw `UnsupportedOperationExcep
 
     if not exists(FS, p) : raise FileNotFoundException
 
-    if not isFile(FS, p) : raise [FileNotFoundException, IOException]
+    if not isFile(FS, p) : raise [FileAlreadyExistsException, FileNotFoundException, IOException]
 
 #### Postconditions
 
@@ -630,6 +653,18 @@ Implementations without a compliant call SHOULD throw `UnsupportedOperationExcep
 Return: `FSDataOutputStream`, which can update the entry `FS.Files[p]`
 by appending data to the existing list.
 
+### `FSDataOutputStreamBuilder appendFile(Path p)`
+
+Make a `FSDataOutputStreamBuilder` to specify the parameters to append to an
+existing file.
+
+#### Implementation Notes
+
+`appendFile(p)` returns a `FSDataOutputStreamBuilder` only and does not make
+change on filesystem immediately. When `build()` is invoked on the `FSDataOutputStreamBuilder`,
+the builder parameters are verified and [`append()`](#FileSystem.append) is
+invoked on the underlying filesystem. `build()` has the same preconditions and
+postconditions as [`append()`](#FileSystem.append).
 
 ### `FSDataInputStream open(Path f, int bufferSize)`
 
@@ -669,6 +704,206 @@ symbolic links
 exists in the metadata, but no copies of any its blocks can be located;
 -`FileNotFoundException` would seem more accurate and useful.
 
+### `FSDataInputStreamBuilder openFile(Path path)`
+
+Creates a [`FSDataInputStreamBuilder`](fsdatainputstreambuilder.html)
+to construct a operation to open the file at `path` for reading.
+
+
+When `build()` is invoked on the returned `FSDataInputStreamBuilder` instance,
+the builder parameters are verified and
+`openFileWithOptions(Path, Set<String>, Configuration, int)` invoked.
+
+This (protected) operation returns a `CompletableFuture<FSDataInputStream>`
+which, when its `get()` method is called, either returns an input
+stream of the contents of opened file, or raises an exception.
+
+The base implementation of the `openFileWithOptions(PathHandle, Set<String>, Configuration, int)`
+ultimately invokes `open(Path, int)`.
+
+Thus the chain `openFile(path).build().get()` has the same preconditions
+and postconditions as `open(Path p, int bufferSize)`
+
+
+The `openFile()` operation may check the state of the filesystem during this
+call, but as the state of the filesystem may change betwen this call and
+the actual `build()` and `get()` operations, this file-specific
+preconditions (file exists, file is readable, etc) MUST NOT be checked here.
+
+FileSystem implementations which do not implement `open(Path, int)`
+MAY postpone raising an `UnsupportedOperationException` until either the
+`FSDataInputStreamBuilder.build()` or the subsequent `get()` call,
+else they MAY fail fast in the `openFile()` call.
+
+### Implementors notes
+
+The base implementation of `openFileWithOptions()` actually executes
+the `open(path)` operation synchronously, yet still returns the result
+or any failures in the `CompletableFuture<>`, so as to ensure that users
+code expecting this.
+
+Any filesystem where the time to open a file may be significant SHOULD
+execute it asynchronously by submitting the operation in some executor/thread
+pool. This is particularly recommended for object stores and other filesystems
+likely to be accessed over long-haul connections.
+
+Arbitrary filesystem-specific options MAY be supported; these MUST
+be prefixed with either the filesystem schema, e.g. `hdfs.`
+or in the "fs.SCHEMA" format as normal configuration settings `fs.hdfs`). The
+latter style allows the same configuration option to be used for both
+filesystem configuration and file-specific configuration.
+
+It SHOULD be possible to always open a file without specifying any options,
+so as to present a consistent model to users. However, an implementation MAY
+opt to require one or more mandatory options to be set.
+
+### `FSDataInputStreamBuilder openFile(PathHandle)`
+
+Creates a `FSDataInputStreamBuilder` to build an operation to open a file.
+Creates a [`FSDataInputStreamBuilder`](fsdatainputstreambuilder.html)
+to construct a operation to open the file identified by the given `PathHandle` for reading.
+
+When `build()` is invoked on the returned `FSDataInputStreamBuilder` instance,
+the builder parameters are verified and
+`openFileWithOptions(PathHandle, Set<String>, Configuration, int)` invoked.
+
+This (protected) operation returns a `CompletableFuture<FSDataInputStream>`
+which, when its `get()` method is called, either returns an input
+stream of the contents of opened file, or raises an exception.
+
+The base implementation of the `openFileWithOptions(Path,PathHandle, Set<String>, Configuration, int)` method
+returns a future which invokes `open(Path, int)`.
+
+Thus the chain `openFile(pathhandle).build().get()` has the same preconditions
+and postconditions as `open(Pathhandle, int)`
+
+As with `FSDataInputStreamBuilder openFile(PathHandle)`, the `openFile()`
+call must not be where path-specific preconditions are checked -that
+is postponed to the `build()` and `get()` calls.
+
+FileSystem implementations which do not implement `open(PathHandle handle, int bufferSize)`
+MAY postpone raising an `UnsupportedOperationException` until either the
+`FSDataInputStreamBuilder.build()` or the subsequent `get()` call,
+else they MAY fail fast in the `openFile()` call.
+
+The base implementation raises this exception in the `build()` operation;
+other implementations SHOULD copy this.
+
+### `PathHandle getPathHandle(FileStatus stat, HandleOpt... options)`
+
+Implementations without a compliant call MUST throw `UnsupportedOperationException`
+
+#### Preconditions
+
+    let stat = getFileStatus(Path p)
+    let FS' where:
+      (FS.Directories', FS.Files', FS.Symlinks')
+      p' in paths(FS') where:
+        exists(FS, stat.path) implies exists(FS', p')
+
+The referent of a `FileStatus` instance, at the time it was resolved, is the
+same referent as the result of `getPathHandle(FileStatus)`. The `PathHandle`
+may be used in subsequent operations to ensure invariants hold between
+calls.
+
+The `options` parameter specifies whether a subsequent call e.g.,
+`open(PathHandle)` will succeed if the referent data or location changed. By
+default, any modification results in an error. The caller MAY specify
+relaxations that allow operations to succeed even if the referent exists at
+a different path and/or its data are changed.
+
+An implementation MUST throw `UnsupportedOperationException` if it cannot
+support the semantics specified by the caller. The default set of options
+are as follows.
+
+|            | Unmoved  | Moved     |
+|-----------:|:--------:|:---------:|
+| Unchanged  | EXACT    | CONTENT   |
+| Changed    | PATH     | REFERENCE |
+
+Changes to ownership, extended attributes, and other metadata are not
+required to match the `PathHandle`. Implementations can extend the set of
+`HandleOpt` parameters with custom constraints.
+
+##### Examples
+
+A client specifies that the `PathHandle` should track the entity across
+renames using `REFERENCE`. The implementation MUST throw an
+`UnsupportedOperationException` when creating the `PathHandle` unless
+failure to resolve the reference implies the entity no longer exists.
+
+A client specifies that the `PathHandle` should resolve only if the entity
+is unchanged using `PATH`. The implementation MUST throw an
+`UnsupportedOperationException` when creating the `PathHandle` unless it can
+distinguish between an identical entity located subsequently at the same
+path.
+
+#### Postconditions
+
+    result = PathHandle(p')
+
+#### Implementation notes
+
+The referent of a `PathHandle` is the namespace when the `FileStatus`
+instance was created, _not_ its state when the `PathHandle` is created. An
+implementation MAY reject attempts to create or resolve `PathHandle`
+instances that are valid, but expensive to service.
+
+Object stores that implement rename by copying objects MUST NOT claim to
+support `CONTENT` and `REFERENCE` unless the lineage of the object is
+resolved.
+
+It MUST be possible to serialize a `PathHandle` instance and reinstantiate
+it in one or more processes, on another machine, and arbitrarily far into
+the future without changing its semantics. The implementation MUST refuse to
+resolve instances if it can no longer guarantee its invariants.
+
+#### HDFS implementation notes
+
+HDFS does not support `PathHandle` references to directories or symlinks.
+Support for `CONTENT` and `REFERENCE` looks up files by INode. INodes are
+not unique across NameNodes, so federated clusters SHOULD include enough
+metadata in the `PathHandle` to detect references from other namespaces.
+
+### `FSDataInputStream open(PathHandle handle, int bufferSize)`
+
+Implementaions without a compliant call MUST throw `UnsupportedOperationException`
+
+#### Preconditions
+
+    let fd = getPathHandle(FileStatus stat)
+    if stat.isdir : raise IOException
+    let FS' where:
+      (FS.Directories', FS.Files', FS.Symlinks')
+      p' in FS.Files' where:
+        FS.Files'[p'] = fd
+    if not exists(FS', p') : raise InvalidPathHandleException
+
+The implementation MUST resolve the referent of the `PathHandle` following
+the constraints specified at its creation by `getPathHandle(FileStatus)`.
+
+Metadata necessary for the `FileSystem` to satisfy this contract MAY be
+encoded in the `PathHandle`.
+
+#### Postconditions
+
+    result = FSDataInputStream(0, FS.Files'[p'])
+
+The stream returned is subject to the constraints of a stream returned by
+`open(Path)`. Constraints checked on open MAY hold to hold for the stream, but
+this is not guaranteed.
+
+For example, a `PathHandle` created with `CONTENT` constraints MAY return a
+stream that ignores updates to the file after it is opened, if it was
+unmodified when `open(PathHandle)` was resolved.
+
+#### Implementation notes
+
+An implementation MAY check invariants either at the server or before
+returning the stream to the client. For example, an implementation may open
+the file, then verify the invariants in the `PathHandle` using
+`getFileStatus(Path)` to implement `CONTENT`. This could yield false
+positives and it requires additional RPC traffic.
 
 ### `boolean delete(Path p, boolean recursive)`
 
@@ -729,7 +964,7 @@ A path referring to a file is removed, return value: `True`
 Deleting an empty root does not change the filesystem state
 and may return true or false.
 
-    if isDir(FS, p) and isRoot(p) and children(FS, p) == {} :
+    if isRoot(p) and children(FS, p) == {} :
         FS ' = FS
         result = (undetermined)
 
@@ -737,6 +972,9 @@ There is no consistent return code from an attempt to delete the root directory.
 
 Implementations SHOULD return true; this avoids code which checks for a false
 return value from overreacting.
+
+*Object Stores*: see [Object Stores: root directory deletion](#object-stores-rm-root).
+
 
 ##### Empty (non-root) directory `recursive == False`
 
@@ -751,7 +989,7 @@ return true.
 ##### Recursive delete of non-empty root directory
 
 Deleting a root path with children and `recursive==True`
- can do one of two things.
+can generally have three outcomes:
 
 1. The POSIX model assumes that if the user has
 the correct permissions to delete everything,
@@ -769,6 +1007,8 @@ filesystem is desired.
             FS' = FS
             result = False
 
+1. Object Stores: see [Object Stores: root directory deletion](#object-stores-rm-root).
+
 HDFS has the notion of *Protected Directories*, which are declared in
 the option `fs.protected.directories`. Any attempt to delete such a directory
 or a parent thereof raises an `AccessControlException`. Accordingly, any
@@ -783,6 +1023,23 @@ which only system administrators should be able to perform.
 Any filesystem client which interacts with a remote filesystem which lacks
 such a security model, MAY reject calls to `delete("/", true)` on the basis
 that it makes it too easy to lose data.
+
+
+### <a name="object-stores-rm-root"></a> Object Stores: root directory deletion
+
+Some of the object store based filesystem implementations always return
+false when deleting the root, leaving the state of the store unchanged.
+
+    if isRoot(p) :
+        FS ' = FS
+        result = False
+
+This is irrespective of the recursive flag status or the state of the directory.
+
+This is a simplification which avoids the inevitably non-atomic scan and delete
+of the contents of the store. It also avoids any confusion about whether
+the operation actually deletes that specific store/container itself, and
+adverse consequences of the simpler permissions models of stores.
 
 ##### Recursive delete of non-root directory
 
@@ -928,7 +1185,7 @@ The outcome is no change to FileSystem state, with a return value of false.
 
     FS' = FS; result = False
 
-*Local Filesystem, S3N*
+*Local Filesystem*
 
 The outcome is as a normal rename, with the additional (implicit) feature
 that the parent directories of the destination also exist.
@@ -1181,6 +1438,10 @@ on (possibly remote) filesystems. These filesystems are invariably accessed
 concurrently; the state of the filesystem MAY change between a `hasNext()`
 probe and the invocation of the `next()` call.
 
+During iteration through a `RemoteIterator`, if the directory is deleted on
+remote filesystem, then `hasNext()` or `next()` call may throw
+`FileNotFoundException`.
+
 Accordingly, a robust iteration through a `RemoteIterator` would catch and
 discard `NoSuchElementException` exceptions raised during the process, which
 could be done through the `while(true)` iteration example above, or
@@ -1202,3 +1463,33 @@ try {
 It is notable that this is *not* done in the Hadoop codebase. This does not imply
 that robust loops are not recommended —more that the concurrency
 problems were not considered during the implementation of these loops.
+
+
+## <a name="StreamCapability"></a> interface `StreamCapabilities`
+
+The `StreamCapabilities` provides a way to programmatically query the
+capabilities that `OutputStream`, `InputStream`, or other FileSystem class
+supports.
+
+```java
+public interface StreamCapabilities {
+  boolean hasCapability(String capability);
+}
+```
+
+### `boolean hasCapability(capability)`
+
+Return true iff the `OutputStream`, `InputStream`, or other FileSystem class
+has the desired capability.
+
+The caller can query the capabilities of a stream using a string value.
+Here is a table of possible string values:
+
+String       | Constant   | Implements       | Description
+-------------|------------|------------------|-------------------------------
+hflush       | HFLUSH     | Syncable         | Flush out the data in client's user buffer. After the return of this call, new readers will see the data.
+hsync        | HSYNC      | Syncable         | Flush out the data in client's user buffer all the way to the disk device (but the disk may have it in its cache). Similar to POSIX fsync.
+in:readahead | READAHEAD  | CanSetReadahead  | Set the readahead on the input stream.
+dropbehind   | DROPBEHIND | CanSetDropBehind | Drop the cache.
+in:unbuffer  | UNBUFFER   | CanUnbuffer      | Reduce the buffering on the input stream.
+

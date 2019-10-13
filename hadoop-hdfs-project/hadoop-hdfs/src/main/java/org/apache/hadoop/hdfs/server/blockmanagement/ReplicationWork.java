@@ -32,8 +32,7 @@ class ReplicationWork extends BlockReconstructionWork {
     assert getSrcNodes().length == 1 :
         "There should be exactly 1 source node that have been selected";
     getSrcNodes()[0].incrementPendingReplicationWithoutTargets();
-    BlockManager.LOG
-        .debug("Creating a ReplicationWork to reconstruct " + block);
+    LOG.debug("Creating a ReplicationWork to reconstruct " + block);
   }
 
   @Override
@@ -44,11 +43,9 @@ class ReplicationWork extends BlockReconstructionWork {
         : "At least 1 source node should have been selected";
     try {
       DatanodeStorageInfo[] chosenTargets = blockplacement.chooseTarget(
-          getBc().getName(), getAdditionalReplRequired(), getSrcNodes()[0],
-          getLiveReplicaStorages(), false, excludedNodes,
-          getBlock().getNumBytes(),
-          storagePolicySuite.getPolicy(getBc().getStoragePolicyID()),
-          null);
+          getSrcPath(), getAdditionalReplRequired(), getSrcNodes()[0],
+          getLiveReplicaStorages(), false, excludedNodes, getBlockSize(),
+          storagePolicySuite.getPolicy(getStoragePolicyID()), null);
       setTargets(chosenTargets);
     } finally {
       getSrcNodes()[0].decrementPendingReplicationWithoutTargets();

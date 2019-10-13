@@ -17,27 +17,27 @@
  */
 package org.apache.hadoop.hdfs.server.datanode.web.webhdfs;
 
-import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
-import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.LastHttpContent;
+import org.slf4j.Logger;
+import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.io.IOUtils;
 
 import java.io.IOException;
 import java.io.OutputStream;
 
-import org.apache.commons.logging.Log;
-import org.apache.hadoop.hdfs.DFSClient;
-import org.apache.hadoop.io.IOUtils;
+import static io.netty.handler.codec.http.HttpHeaders.Names.CONNECTION;
+import static io.netty.handler.codec.http.HttpHeaders.Values.CLOSE;
 
 class HdfsWriter extends SimpleChannelInboundHandler<HttpContent> {
   private final DFSClient client;
   private final OutputStream out;
   private final DefaultHttpResponse response;
-  private static final Log LOG = WebHdfsHandler.LOG;
+  private static final Logger LOG = WebHdfsHandler.LOG;
 
   HdfsWriter(DFSClient client, OutputStream out, DefaultHttpResponse response) {
     this.client = client;
@@ -82,8 +82,8 @@ class HdfsWriter extends SimpleChannelInboundHandler<HttpContent> {
   }
 
   private void releaseDfsResources() {
-    IOUtils.cleanup(LOG, out);
-    IOUtils.cleanup(LOG, client);
+    IOUtils.cleanupWithLogger(LOG, out);
+    IOUtils.cleanupWithLogger(LOG, client);
   }
 
   private void releaseDfsResourcesAndThrow() throws Exception {

@@ -32,8 +32,6 @@ import java.util.Map;
 
 import org.junit.Assert;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Text;
@@ -49,11 +47,14 @@ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecret
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.Time;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.*;
 
 public class TestDelegationToken {
-  private static final Log LOG = LogFactory.getLog(TestDelegationToken.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestDelegationToken.class);
   private static final Text KIND = new Text("MY KIND");
 
   public static class TestDelegationTokenIdentifier 
@@ -256,6 +257,29 @@ public class TestDelegationToken {
                  ugi.getAuthenticationMethod());
     assertEquals(AuthenticationMethod.TOKEN,
                  ugi.getRealUser().getAuthenticationMethod());
+  }
+
+  @Test
+  public void testDelegationTokenCount() throws Exception {
+    final TestDelegationTokenSecretManager dtSecretManager =
+        new TestDelegationTokenSecretManager(24*60*60*1000,
+            3*1000, 1*1000, 3600000);
+    try {
+      dtSecretManager.startThreads();
+      Assert.assertEquals(dtSecretManager.getCurrentTokensSize(), 0);
+      final Token<TestDelegationTokenIdentifier> token1 =
+          generateDelegationToken(dtSecretManager, "SomeUser", "JobTracker");
+      Assert.assertEquals(dtSecretManager.getCurrentTokensSize(), 1);
+      final Token<TestDelegationTokenIdentifier> token2 =
+          generateDelegationToken(dtSecretManager, "SomeUser", "JobTracker");
+      Assert.assertEquals(dtSecretManager.getCurrentTokensSize(), 2);
+      dtSecretManager.cancelToken(token1, "JobTracker");
+      Assert.assertEquals(dtSecretManager.getCurrentTokensSize(), 1);
+      dtSecretManager.cancelToken(token2, "JobTracker");
+      Assert.assertEquals(dtSecretManager.getCurrentTokensSize(), 0);
+    } finally {
+      dtSecretManager.stopThreads();
+    }
   }
 
   @Test

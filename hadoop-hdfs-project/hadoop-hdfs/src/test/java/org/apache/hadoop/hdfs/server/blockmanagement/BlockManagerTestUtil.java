@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 
@@ -32,11 +33,11 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.test.Whitebox;
 import org.apache.hadoop.util.Daemon;
 import org.junit.Assert;
 
 import com.google.common.base.Preconditions;
-import org.mockito.internal.util.reflection.Whitebox;
 
 public class BlockManagerTestUtil {
   public static void setNodeReplicationLimit(final BlockManager blockManager,
@@ -55,6 +56,21 @@ public class BlockManagerTestUtil {
     }
   }
 
+  public static Iterator<BlockInfo> getBlockIterator(final FSNamesystem ns,
+      final String storageID, final int startBlock) {
+    ns.readLock();
+    try {
+      DatanodeDescriptor dn =
+          ns.getBlockManager().getDatanodeManager().getDatanode(storageID);
+      return dn.getBlockIterator(startBlock);
+    } finally {
+      ns.readUnlock();
+    }
+  }
+
+  public static Iterator<BlockInfo> getBlockIterator(DatanodeStorageInfo s) {
+    return s.getBlockIterator();
+  }
 
   /**
    * Refresh block queue counts on the name-node.
@@ -65,7 +81,8 @@ public class BlockManagerTestUtil {
 
   /**
    * @return a tuple of the replica state (number racks, number live
-   * replicas, and number needed replicas) for the given block.
+   * replicas, number needed replicas and number of UpgradeDomains) for the
+   * given block.
    */
   public static int[] getReplicaInfo(final FSNamesystem namesystem, final Block b) {
     final BlockManager bm = namesystem.getBlockManager();
@@ -74,7 +91,8 @@ public class BlockManagerTestUtil {
       final BlockInfo storedBlock = bm.getStoredBlock(b);
       return new int[]{getNumberOfRacks(bm, b),
           bm.countNodes(storedBlock).liveReplicas(),
-          bm.neededReconstruction.contains(storedBlock) ? 1 : 0};
+          bm.neededReconstruction.contains(storedBlock) ? 1 : 0,
+          getNumberOfDomains(bm, b)};
     } finally {
       namesystem.readUnlock();
     }
@@ -105,6 +123,30 @@ public class BlockManagerTestUtil {
   }
 
   /**
+   * @return the number of UpgradeDomains over which a given block is replicated
+   * decommissioning/decommissioned nodes are not counted. corrupt replicas
+   * are also ignored.
+   */
+  private static int getNumberOfDomains(final BlockManager blockManager,
+                                        final Block b) {
+    final Set<String> domSet = new HashSet<String>(0);
+    final Collection<DatanodeDescriptor> corruptNodes =
+        getCorruptReplicas(blockManager).getNodes(b);
+    for(DatanodeStorageInfo storage : blockManager.blocksMap.getStorages(b)) {
+      final DatanodeDescriptor cur = storage.getDatanodeDescriptor();
+      if (!cur.isDecommissionInProgress() && !cur.isDecommissioned()) {
+        if ((corruptNodes == null) || !corruptNodes.contains(cur)) {
+          String domain = cur.getUpgradeDomain();
+          if (domain != null && !domSet.contains(domain)) {
+            domSet.add(domain);
+          }
+        }
+      }
+    }
+    return domSet.size();
+  }
+
+  /**
    * @return redundancy monitor thread instance from block manager.
    */
   public static Daemon getRedundancyThread(final BlockManager blockManager) {
@@ -124,6 +166,11 @@ public class BlockManagerTestUtil {
       throw new IOException(
           "Interrupted while trying to stop RedundancyMonitor");
     }
+  }
+
+  public static HeartbeatManager getHeartbeatManager(
+      final BlockManager blockManager) {
+    return blockManager.getDatanodeManager().getHeartbeatManager();
   }
 
   /**
@@ -147,7 +194,17 @@ public class BlockManagerTestUtil {
   public static int computeInvalidationWork(BlockManager bm) {
     return bm.computeInvalidateWork(Integer.MAX_VALUE);
   }
-  
+
+  /**
+   * Check the redundancy of blocks and trigger replication if needed.
+   * @param blockManager
+   */
+  public static void checkRedundancy(final BlockManager blockManager) {
+    blockManager.computeDatanodeWork();
+    blockManager.processPendingReconstructions();
+    blockManager.rescanPostponedMisreplicatedBlocks();
+  }
+
   /**
    * Compute all the replication and invalidation work for the
    * given BlockManager.
@@ -307,7 +364,7 @@ public class BlockManagerTestUtil {
    */
   public static void recheckDecommissionState(DatanodeManager dm)
       throws ExecutionException, InterruptedException {
-    dm.getDecomManager().runMonitorForTest();
+    dm.getDatanodeAdminManager().runMonitorForTest();
   }
 
   /**

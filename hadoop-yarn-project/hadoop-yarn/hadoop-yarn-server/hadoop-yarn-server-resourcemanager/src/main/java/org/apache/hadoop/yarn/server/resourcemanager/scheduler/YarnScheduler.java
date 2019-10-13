@@ -42,6 +42,7 @@ import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.SchedulingRequest;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.exceptions.YarnException;
@@ -132,18 +133,18 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * 
    * @param appAttemptId
    * @param ask
+   * @param schedulingRequests
    * @param release
-   * @param blacklistAdditions 
-   * @param blacklistRemovals 
-   * @param updateRequests
-   * @return the {@link Allocation} for the application
+   * @param blacklistAdditions
+   * @param blacklistRemovals
+   * @param updateRequests     @return the {@link Allocation} for the application
    */
   @Public
   @Stable
   Allocation allocate(ApplicationAttemptId appAttemptId,
-      List<ResourceRequest> ask, List<ContainerId> release,
-      List<String> blacklistAdditions, List<String> blacklistRemovals,
-      ContainerUpdates updateRequests);
+      List<ResourceRequest> ask, List<SchedulingRequest> schedulingRequests,
+      List<ContainerId> release, List<String> blacklistAdditions,
+      List<String> blacklistRemovals, ContainerUpdates updateRequests);
 
   /**
    * Get node resource usage report.
@@ -272,7 +273,7 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * @param newQueue the queue being added.
    * @throws YarnException
    */
-  void addQueue(Queue newQueue) throws YarnException;
+  void addQueue(Queue newQueue) throws YarnException, IOException;
 
   /**
    * This method increase the entitlement for current queue (must respect
@@ -363,6 +364,16 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
       ApplicationAttemptId attemptId);
 
   /**
+   * Get pending scheduling request for specified application attempt.
+   *
+   * @param attemptId the id of the application attempt
+   *
+   * @return pending scheduling requests
+   */
+  List<SchedulingRequest> getPendingSchedulingRequestsForAttempt(
+      ApplicationAttemptId attemptId);
+
+  /**
    * Get cluster max priority.
    * 
    * @return maximum priority of cluster
@@ -379,10 +390,35 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
   SchedulerNode getSchedulerNode(NodeId nodeId);
 
   /**
-   * Normalize a resource request.
+   * Normalize a resource request using scheduler level maximum resource or
+   * queue based maximum resource.
    *
    * @param requestedResource the resource to be normalized
+   * @param maxResourceCapability Maximum container allocation value, if null or
+   *          empty scheduler level maximum container allocation value will be
+   *          used
    * @return the normalized resource
    */
-  Resource getNormalizedResource(Resource requestedResource);
+  Resource getNormalizedResource(Resource requestedResource,
+      Resource maxResourceCapability);
+
+  /**
+   * Verify whether a submitted application lifetime is valid as per configured
+   * Queue lifetime.
+   * @param queueName Name of the Queue
+   * @param lifetime configured application lifetime
+   * @return valid lifetime as per queue
+   */
+  @Public
+  @Evolving
+  long checkAndGetApplicationLifetime(String queueName, long lifetime);
+
+  /**
+   * Get maximum lifetime for a queue.
+   * @param queueName to get lifetime
+   * @return maximum lifetime in seconds
+   */
+  @Public
+  @Evolving
+  long getMaximumApplicationLifetime(String queueName);
 }

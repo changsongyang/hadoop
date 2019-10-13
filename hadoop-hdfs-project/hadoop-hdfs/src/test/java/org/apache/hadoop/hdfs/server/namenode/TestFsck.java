@@ -18,15 +18,15 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.apache.hadoop.hdfs.MiniDFSCluster.HDFS_MINIDFS_BASEDIR;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyObject;
-import static org.mockito.Matchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -59,9 +59,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.google.common.base.Supplier;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -80,6 +79,7 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.StripedFileTestUtil;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
@@ -90,6 +90,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
@@ -107,6 +108,7 @@ import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.Result;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.ReplicationResult;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.ErasureCodingResult;
+import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.tools.DFSck;
 import org.apache.hadoop.hdfs.util.HostsFileWriter;
@@ -132,8 +134,8 @@ import com.google.common.collect.Sets;
  * A JUnit test for doing fsck.
  */
 public class TestFsck {
-  private static final Log LOG =
-      LogFactory.getLog(TestFsck.class.getName());
+  private static final org.slf4j.Logger LOG =
+      LoggerFactory.getLogger(TestFsck.class.getName());
 
   static final String AUDITLOG_FILE =
       GenericTestUtils.getTempPath("TestFsck-audit.log");
@@ -162,18 +164,20 @@ public class TestFsck {
   private static final String LINE_SEPARATOR =
       System.getProperty("line.separator");
 
-  static String runFsck(Configuration conf, int expectedErrCode, 
+  public static String runFsck(Configuration conf, int expectedErrCode,
                         boolean checkErrorCode, String... path)
                         throws Exception {
     ByteArrayOutputStream bStream = new ByteArrayOutputStream();
     PrintStream out = new PrintStream(bStream, true);
-    GenericTestUtils.setLogLevel(FSPermissionChecker.LOG, Level.ALL);
+    GenericTestUtils.setLogLevel(
+        FSPermissionChecker.LOG, org.slf4j.event.Level.TRACE);
     int errCode = ToolRunner.run(new DFSck(conf, out), path);
     LOG.info("OUTPUT = " + bStream.toString());
     if (checkErrorCode) {
       assertEquals(expectedErrCode, errCode);
     }
-    GenericTestUtils.setLogLevel(FSPermissionChecker.LOG, Level.INFO);
+    GenericTestUtils.setLogLevel(
+        FSPermissionChecker.LOG, org.slf4j.event.Level.INFO);
     return bStream.toString();
   }
 
@@ -206,7 +210,9 @@ public class TestFsck {
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY,
         precision);
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     fs = cluster.getFileSystem();
     final String fileName = "/srcdat";
     util.createFiles(fs, fileName);
@@ -294,7 +300,9 @@ public class TestFsck {
         setNumFiles(20).build();
     FileSystem fs = null;
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     fs = cluster.getFileSystem();
     util.createFiles(fs, "/srcdat");
     util.waitReplication(fs, "/srcdat", (short)3);
@@ -312,7 +320,9 @@ public class TestFsck {
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
 
     // Create a cluster with the current user, write some files
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     final MiniDFSCluster c2 = cluster;
     final String dir = "/dfsck";
     final Path dirpath = new Path(dir);
@@ -358,8 +368,9 @@ public class TestFsck {
     DFSTestUtil util = new DFSTestUtil("TestFsck", 5, 3,
         (5 * dfsBlockSize) + (dfsBlockSize - 1), 5 * dfsBlockSize);
     FileSystem fs = null;
-    cluster = new MiniDFSCluster.Builder(conf).
-        numDataNodes(numDatanodes).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDatanodes).build();
     String topDir = "/srcdat";
     fs = cluster.getFileSystem();
     cluster.waitActive();
@@ -565,7 +576,9 @@ public class TestFsck {
     FileSystem fs = null;
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
     conf.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_INTERVAL_KEY, 1);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     String topDir = "/srcdat";
     fs = cluster.getFileSystem();
     cluster.waitActive();
@@ -629,7 +642,9 @@ public class TestFsck {
         setNumFiles(4).build();
     FileSystem fs = null;
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     String topDir = "/srcdat";
     String randomString = "HADOOP  ";
     fs = cluster.getFileSystem();
@@ -676,32 +691,35 @@ public class TestFsck {
         setNumFiles(4).build();
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
     ErasureCodingPolicy ecPolicy =
-        ErasureCodingPolicyManager.getSystemDefaultPolicy();
-    int numAllUnits = ecPolicy.getNumDataUnits() + ecPolicy.getNumParityUnits();
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(
+        StripedFileTestUtil.getDefaultECPolicy();
+    final int dataBlocks = ecPolicy.getNumDataUnits();
+    final int cellSize = ecPolicy.getCellSize();
+    final int numAllUnits = dataBlocks + ecPolicy.getNumParityUnits();
+    int blockSize = 2 * cellSize;
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).numDataNodes(
         numAllUnits + 1).build();
-    FileSystem fs = null;
     String topDir = "/myDir";
-    byte[] randomBytes = new byte[3000000];
-    int seed = 42;
-    new Random(seed).nextBytes(randomBytes);
     cluster.waitActive();
-    fs = cluster.getFileSystem();
+    DistributedFileSystem fs = cluster.getFileSystem();
+    fs.enableErasureCodingPolicy(ecPolicy.getName());
     util.createFiles(fs, topDir);
     // set topDir to EC when it has replicated files
     cluster.getFileSystem().getClient().setErasureCodingPolicy(
-        topDir, ecPolicy);
+        topDir, ecPolicy.getName());
 
     // create a new file under topDir
     DFSTestUtil.createFile(fs, new Path(topDir, "ecFile"), 1024, (short) 1, 0L);
     // Open a EC file for writing and do not close for now
     Path openFile = new Path(topDir + "/openECFile");
     FSDataOutputStream out = fs.create(openFile);
-    int writeCount = 0;
-    while (writeCount != 300) {
-      out.write(randomBytes);
-      writeCount++;
-    }
+    int blockGroupSize = dataBlocks * blockSize;
+    // data size is more than 1 block group and less than 2 block groups
+    byte[] randomBytes = new byte[2 * blockGroupSize - cellSize];
+    int seed = 42;
+    new Random(seed).nextBytes(randomBytes);
+    out.write(randomBytes);
 
     // make sure the fsck can correctly handle mixed ec/replicated files
     runFsck(conf, 0, true, topDir, "-files", "-blocks", "-openforwrite");
@@ -722,6 +740,27 @@ public class TestFsck {
     assertTrue(outStr.contains("Live_repl=" + numAllUnits));
     assertTrue(outStr.contains("Expected_repl=" + numAllUnits));
     assertTrue(outStr.contains("Under Construction Block:"));
+
+    // check reported blockIDs of internal blocks
+    LocatedStripedBlock lsb = (LocatedStripedBlock)fs.getClient()
+        .getLocatedBlocks(openFile.toString(), 0, cellSize * dataBlocks).get(0);
+    long groupId = lsb.getBlock().getBlockId();
+    byte[] indices = lsb.getBlockIndices();
+    DatanodeInfo[] locs = lsb.getLocations();
+    long blockId;
+    for (int i = 0; i < indices.length; i++) {
+      blockId = groupId + indices[i];
+      String str = "blk_" + blockId + ":" + locs[i];
+      assertTrue(outStr.contains(str));
+    }
+
+    // check the output of under-constructed blocks doesn't include the blockIDs
+    String regex = ".*Expected_repl=" + numAllUnits + "(.*)\nStatus:.*";
+    Pattern p = Pattern.compile(regex, Pattern.DOTALL);
+    Matcher m = p.matcher(outStr);
+    assertTrue(m.find());
+    String ucBlockOutput = m.group(1);
+    assertFalse(ucBlockOutput.contains("blk_"));
 
     // Close the file
     out.close();
@@ -750,7 +789,9 @@ public class TestFsck {
     String outStr = null;
     short factor = 1;
 
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(1).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
     Path file1 = new Path("/testCorruptBlock");
@@ -821,7 +862,9 @@ public class TestFsck {
     Random random = new Random();
     String outStr = null;
     short factor = 1;
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(2).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
     Path file1 = new Path("/testUnderMinReplicatedBlock");
@@ -876,7 +919,7 @@ public class TestFsck {
     System.out.println(outStr);
     assertTrue(outStr.contains(NamenodeFsck.HEALTHY_STATUS));
     assertTrue(outStr.contains("UNDER MIN REPL'D BLOCKS:\t1 (100.0 %)"));
-    assertTrue(outStr.contains("dfs.namenode.replication.min:\t2"));
+    assertTrue(outStr.contains("MINIMAL BLOCK REPLICATION:\t2"));
   }
 
   @Test(timeout = 90000)
@@ -893,9 +936,9 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 1);
 
     DistributedFileSystem dfs;
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-            .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
     cluster.waitClusterUp();
     dfs = cluster.getFileSystem();
 
@@ -920,7 +963,8 @@ public class TestFsck {
     DatanodeDescriptor dnDesc0 = dnm.getDatanode(
         cluster.getDataNodes().get(0).getDatanodeId());
 
-    bm.getDatanodeManager().getDecomManager().startDecommission(dnDesc0);
+    bm.getDatanodeManager().getDatanodeAdminManager().startDecommission(
+        dnDesc0);
     final String dn0Name = dnDesc0.getXferAddr();
 
     // check the replica status while decommissioning
@@ -973,7 +1017,7 @@ public class TestFsck {
         cluster.getDataNodes().get(1).getDatanodeId());
     final String dn1Name = dnDesc1.getXferAddr();
 
-    bm.getDatanodeManager().getDecomManager().startMaintenance(dnDesc1,
+    bm.getDatanodeManager().getDatanodeAdminManager().startMaintenance(dnDesc1,
         Long.MAX_VALUE);
 
     // check the replica status while entering maintenance
@@ -1041,7 +1085,8 @@ public class TestFsck {
   @Test
   public void testFsckError() throws Exception {
     // bring up a one-node cluster
-    cluster = new MiniDFSCluster.Builder(conf).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).build();
     String fileName = "/test.txt";
     Path filePath = new Path(fileName);
     FileSystem fs = cluster.getFileSystem();
@@ -1073,7 +1118,8 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_INTERVAL_KEY, 1);
     FileSystem fs = null;
 
-    cluster = new MiniDFSCluster.Builder(conf).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
     DFSTestUtil util = new DFSTestUtil.Builder().
@@ -1136,7 +1182,8 @@ public class TestFsck {
   @Test
   public void testToCheckTheFsckCommandOnIllegalArguments() throws Exception {
     // bring up a one-node cluster
-    cluster = new MiniDFSCluster.Builder(conf).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).build();
     String fileName = "/test.txt";
     Path filePath = new Path(fileName);
     FileSystem fs = cluster.getFileSystem();
@@ -1180,8 +1227,9 @@ public class TestFsck {
     DistributedFileSystem dfs = null;
     
     // Startup a minicluster
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numReplicas).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numReplicas).build();
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
     dfs = cluster.getFileSystem();
@@ -1241,9 +1289,9 @@ public class TestFsck {
     DistributedFileSystem dfs = null;
     
     // Startup a minicluster
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-        .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
     dfs = cluster.getFileSystem();
@@ -1305,7 +1353,7 @@ public class TestFsck {
     when(fsName.getBlockManager()).thenReturn(blockManager);
     when(fsName.getFSDirectory()).thenReturn(fsd);
     when(fsd.getFSNamesystem()).thenReturn(fsName);
-    when(fsd.resolvePath(anyObject(), anyString(), any(DirOp.class))).thenReturn(iip);
+    when(fsd.resolvePath(any(), anyString(), any(DirOp.class))).thenReturn(iip);
     when(blockManager.getDatanodeManager()).thenReturn(dnManager);
 
     NamenodeFsck fsck = new NamenodeFsck(conf, namenode, nettop, pmap, out,
@@ -1313,24 +1361,20 @@ public class TestFsck {
 
     String pathString = "/tmp/testFile";
 
-    long length = 123L;
-    boolean isDir = false;
-    int blockReplication = 1;
-    long blockSize = 128 *1024L;
-    long modTime = 123123123L;
-    long accessTime = 123123120L;
-    FsPermission perms = FsPermission.getDefault();
-    String owner = "foo";
-    String group = "bar";
-    byte[] symlink = null;
-    byte[] path = DFSUtil.string2Bytes(pathString);
-    long fileId = 312321L;
-    int numChildren = 1;
-    byte storagePolicy = 0;
-
-    HdfsFileStatus file = new HdfsFileStatus(length, isDir, blockReplication,
-        blockSize, modTime, accessTime, perms, owner, group, symlink,
-        path, fileId, numChildren, null, storagePolicy, null);
+    HdfsFileStatus file = new HdfsFileStatus.Builder()
+        .length(123L)
+        .replication(1)
+        .blocksize(128 * 1024L)
+        .mtime(123123123L)
+        .atime(123123120L)
+        .perm(FsPermission.getDefault())
+        .owner("foo")
+        .group("bar")
+        .path(DFSUtil.string2Bytes(pathString))
+        .fileId(312321L)
+        .children(1)
+        .storagePolicy(HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED)
+        .build();
     Result replRes = new ReplicationResult(conf);
     Result ecRes = new ErasureCodingResult(conf);
 
@@ -1354,7 +1398,9 @@ public class TestFsck {
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY,
         precision);
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(4).build();
     fs = cluster.getFileSystem();
     final String fileName = "/srcdat";
     util.createFiles(fs, fileName);
@@ -1381,7 +1427,8 @@ public class TestFsck {
    */
   @Test
   public void testFsckForSnapshotFiles() throws Exception {
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).numDataNodes(1)
         .build();
     String runFsck = runFsck(conf, 0, true, "/", "-includeSnapshots",
         "-files");
@@ -1416,9 +1463,9 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 2);
 
     DistributedFileSystem dfs = null;
-    cluster =
-      new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-        .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
 
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
@@ -1471,9 +1518,9 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 2);
 
     DistributedFileSystem dfs;
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-            .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
 
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
@@ -1511,7 +1558,7 @@ public class TestFsck {
       fsn.writeUnlock();
     }
     DatanodeDescriptor dn = bc.getBlocks()[0].getDatanode(0);
-    bm.getDatanodeManager().getDecomManager().startDecommission(dn);
+    bm.getDatanodeManager().getDatanodeAdminManager().startDecommission(dn);
     String dnName = dn.getXferAddr();
 
     //wait for decommission start
@@ -1556,7 +1603,8 @@ public class TestFsck {
         replFactor);
 
     DistributedFileSystem dfs;
-    cluster = new MiniDFSCluster.Builder(conf)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
         .numDataNodes(numDn)
         .hosts(hosts)
         .racks(racks)
@@ -1591,7 +1639,7 @@ public class TestFsck {
     DatanodeManager dnm = bm.getDatanodeManager();
     DatanodeDescriptor dn = dnm.getDatanode(cluster.getDataNodes().get(0)
         .getDatanodeId());
-    bm.getDatanodeManager().getDecomManager().startMaintenance(dn,
+    bm.getDatanodeManager().getDatanodeAdminManager().startMaintenance(dn,
         Long.MAX_VALUE);
     final String dnName = dn.getXferAddr();
 
@@ -1677,9 +1725,9 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 1);
 
     DistributedFileSystem dfs = null;
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-            .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
 
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
@@ -1746,7 +1794,8 @@ public class TestFsck {
    */
   @Test
   public void testStoragePoliciesCK() throws Exception {
-    cluster = new MiniDFSCluster.Builder(conf)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
         .numDataNodes(3)
         .storageTypes(
             new StorageType[] {StorageType.DISK, StorageType.ARCHIVE})
@@ -1789,9 +1838,9 @@ public class TestFsck {
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 1);
 
     DistributedFileSystem dfs;
-    cluster =
-        new MiniDFSCluster.Builder(conf).numDataNodes(numDn).hosts(hosts)
-            .racks(racks).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(numDn).hosts(hosts).racks(racks).build();
 
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
@@ -1826,7 +1875,7 @@ public class TestFsck {
     }
     DatanodeDescriptor dn = bc.getBlocks()[0]
         .getDatanode(0);
-    bm.getDatanodeManager().getDecomManager().startDecommission(dn);
+    bm.getDatanodeManager().getDatanodeAdminManager().startDecommission(dn);
     String dnName = dn.getXferAddr();
 
     // wait for decommission start
@@ -1871,7 +1920,8 @@ public class TestFsck {
         replFactor);
 
     DistributedFileSystem dfs;
-    cluster = new MiniDFSCluster.Builder(conf)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
         .numDataNodes(numDn)
         .hosts(hosts)
         .racks(racks)
@@ -1905,7 +1955,7 @@ public class TestFsck {
     DatanodeManager dnm = bm.getDatanodeManager();
     DatanodeDescriptor dn = dnm.getDatanode(cluster.getDataNodes().get(0)
         .getDatanodeId());
-    bm.getDatanodeManager().getDecomManager().startMaintenance(dn,
+    bm.getDatanodeManager().getDatanodeAdminManager().startMaintenance(dn,
         Long.MAX_VALUE);
     final String dnName = dn.getXferAddr();
 
@@ -1970,18 +2020,21 @@ public class TestFsck {
 
   @Test
   public void testECFsck() throws Exception {
-    FileSystem fs = null;
+    DistributedFileSystem fs = null;
     final long precision = 1L;
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY,
         precision);
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10000L);
-    int dataBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumDataUnits();
-    int parityBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumParityUnits();
+    int dataBlocks = StripedFileTestUtil.getDefaultECPolicy().getNumDataUnits();
+    int parityBlocks =
+        StripedFileTestUtil.getDefaultECPolicy().getNumParityUnits();
     int totalSize = dataBlocks + parityBlocks;
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(totalSize).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
+        .numDataNodes(totalSize).build();
     fs = cluster.getFileSystem();
+    fs.enableErasureCodingPolicy(
+        StripedFileTestUtil.getDefaultECPolicy().getName());
 
     // create a contiguous file
     Path replDirPath = new Path("/replicated");
@@ -2045,7 +2098,8 @@ public class TestFsck {
 
     int numFiles = 3;
     int numSnapshots = 0;
-    cluster = new MiniDFSCluster.Builder(conf).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).build();
     cluster.waitActive();
     hdfs = cluster.getFileSystem();
     DFSTestUtil util = new DFSTestUtil.Builder().
@@ -2125,7 +2179,8 @@ public class TestFsck {
     conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 1000L);
     conf.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_INTERVAL_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, replication);
-    cluster = new MiniDFSCluster.Builder(conf).build();
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir).build();
     DistributedFileSystem dfs = cluster.getFileSystem();
     cluster.waitActive();
 
@@ -2220,6 +2275,7 @@ public class TestFsck {
     HostsFileWriter hostsFileWriter = new HostsFileWriter();
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, replFactor);
+    conf.set(HDFS_MINIDFS_BASEDIR, GenericTestUtils.getRandomizedTempPath());
     if (defineUpgradeDomain) {
       conf.setClass(DFSConfigKeys.DFS_NAMENODE_HOSTS_PROVIDER_CLASSNAME_KEY,
           CombinedHostFileManager.class, HostConfigManager.class);
@@ -2266,16 +2322,17 @@ public class TestFsck {
   @Test (timeout = 300000)
   public void testFsckCorruptECFile() throws Exception {
     DistributedFileSystem fs = null;
-    int dataBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumDataUnits();
-    int parityBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumParityUnits();
-    int cellSize = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getCellSize();
+    int dataBlocks = StripedFileTestUtil.getDefaultECPolicy().getNumDataUnits();
+    int parityBlocks =
+        StripedFileTestUtil.getDefaultECPolicy().getNumParityUnits();
+    int cellSize = StripedFileTestUtil.getDefaultECPolicy().getCellSize();
     int totalSize = dataBlocks + parityBlocks;
-    cluster = new MiniDFSCluster.Builder(conf)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
         .numDataNodes(totalSize).build();
     fs = cluster.getFileSystem();
+    fs.enableErasureCodingPolicy(
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     Map<Integer, Integer> dnIndices = new HashMap<>();
     ArrayList<DataNode> dnList = cluster.getDataNodes();
     for (int i = 0; i < totalSize; i++) {
@@ -2285,7 +2342,8 @@ public class TestFsck {
     // create file
     Path ecDirPath = new Path("/striped");
     fs.mkdir(ecDirPath, FsPermission.getDirDefault());
-    fs.getClient().setErasureCodingPolicy(ecDirPath.toString(), null);
+    fs.getClient().setErasureCodingPolicy(ecDirPath.toString(),
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     Path file = new Path(ecDirPath, "corrupted");
     final int length = cellSize * dataBlocks;
     final byte[] bytes = StripedFileTestUtil.generateBytes(length);
@@ -2336,21 +2394,23 @@ public class TestFsck {
   @Test (timeout = 300000)
   public void testFsckMissingECFile() throws Exception {
     DistributedFileSystem fs = null;
-    int dataBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumDataUnits();
-    int parityBlocks = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getNumParityUnits();
-    int cellSize = ErasureCodingPolicyManager
-        .getSystemDefaultPolicy().getCellSize();
+    int dataBlocks = StripedFileTestUtil.getDefaultECPolicy().getNumDataUnits();
+    int parityBlocks =
+        StripedFileTestUtil.getDefaultECPolicy().getNumParityUnits();
+    int cellSize = StripedFileTestUtil.getDefaultECPolicy().getCellSize();
     int totalSize = dataBlocks + parityBlocks;
-    cluster = new MiniDFSCluster.Builder(conf)
+    File builderBaseDir = new File(GenericTestUtils.getRandomizedTempPath());
+    cluster = new MiniDFSCluster.Builder(conf, builderBaseDir)
         .numDataNodes(totalSize).build();
     fs = cluster.getFileSystem();
+    fs.enableErasureCodingPolicy(
+        StripedFileTestUtil.getDefaultECPolicy().getName());
 
     // create file
     Path ecDirPath = new Path("/striped");
     fs.mkdir(ecDirPath, FsPermission.getDirDefault());
-    fs.getClient().setErasureCodingPolicy(ecDirPath.toString(), null);
+    fs.getClient().setErasureCodingPolicy(ecDirPath.toString(),
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     Path file = new Path(ecDirPath, "missing");
     final int length = cellSize * dataBlocks;
     final byte[] bytes = StripedFileTestUtil.generateBytes(length);
@@ -2396,5 +2456,54 @@ public class TestFsck {
         return false;
       }
     }, 1000, 60000);
+  }
+
+  @Test(timeout = 300000)
+  public void testFsckCorruptWhenOneReplicaIsCorrupt()
+      throws Exception {
+    try (MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf,
+        new File(GenericTestUtils.getRandomizedTempPath()))
+        .nnTopology(MiniDFSNNTopology.simpleHATopology()).numDataNodes(2)
+        .build()) {
+      cluster.waitActive();
+      FileSystem fs = HATestUtil.configureFailoverFs(cluster, conf);
+      cluster.transitionToActive(0);
+      String filePath = "/appendTest";
+      Path fileName = new Path(filePath);
+      DFSTestUtil.createFile(fs, fileName, 512, (short) 2, 0);
+      DFSTestUtil.waitReplication(fs, fileName, (short) 2);
+      Assert.assertTrue("File not created", fs.exists(fileName));
+      cluster.getDataNodes().get(1).shutdown();
+      DFSTestUtil.appendFile(fs, fileName, "appendCorruptBlock");
+      cluster.restartDataNode(1, true);
+      GenericTestUtils.waitFor(new Supplier<Boolean>() {
+        @Override public Boolean get() {
+          return (
+              cluster.getNameNode(0).getNamesystem().getCorruptReplicaBlocks()
+                  > 0);
+        }
+      }, 100, 5000);
+
+      DFSTestUtil.appendFile(fs, fileName, "appendCorruptBlock");
+      runFsck(cluster.getConfiguration(0), 0, true, "/");
+    }
+  }
+
+  @Test
+  public void testFsckNonPrivilegedListCorrupt() throws Exception {
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
+    UserGroupInformation ugi = UserGroupInformation.createUserForTesting("systest", new String[]{""});
+    ugi.doAs(new PrivilegedExceptionAction<Void>() {
+       @Override
+        public Void run() throws Exception {
+         String path = "/";
+         String outStr = runFsck(conf, -1, true, path, "-list-corruptfileblocks");
+
+         assertFalse(outStr.contains("The list of corrupt files under path '" + path + "' are:"));
+         assertFalse(outStr.contains("The filesystem under path '" + path + "' has "));
+         assertTrue(outStr.contains("Failed to open path '" + path + "': Permission denied"));
+         return null;
+       }
+      });
   }
 }

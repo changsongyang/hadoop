@@ -22,7 +22,6 @@ import static org.junit.Assert.*;
 import java.security.NoSuchAlgorithmException;
 
 import com.google.common.base.Supplier;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
@@ -30,7 +29,6 @@ import org.apache.hadoop.ha.HealthMonitor.State;
 import org.apache.hadoop.ha.MiniZKFCCluster.DummyZKFC;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
-import org.apache.log4j.Level;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
@@ -41,6 +39,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 import org.mockito.Mockito;
+import org.slf4j.event.Level;
 
 public class TestZKFailoverController extends ClientBaseWithFixes {
   private Configuration conf;
@@ -71,7 +70,7 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
     "digest:" + DIGEST_USER_HASH + ":rwcda";
   
   static {
-    ((Log4JLogger)ActiveStandbyElector.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(ActiveStandbyElector.LOG, Level.TRACE);
   }
   
   @Before
@@ -282,6 +281,21 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
   }
 
   /**
+   * Test that the local node is observer.
+   */
+  @Test
+  public void testVerifyObserverState()
+          throws Exception {
+    cluster.start(3);
+    DummyHAService svc2 = cluster.getService(2);
+    svc2.state = HAServiceState.OBSERVER;
+
+    // Verify svc2 is observer
+    LOG.info("Waiting for svc2 to enter observer state");
+    cluster.waitForHAState(2, HAServiceState.OBSERVER);
+  }
+
+  /**
    * Test that, if the standby node is unhealthy, it doesn't try to become
    * active
    */
@@ -472,6 +486,32 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
       GenericTestUtils.assertExceptionContains(
           cluster.getService(1).toString() +
           " is not currently healthy.", sfe);
+    }
+  }
+
+  @Test
+  public void testObserverExitGracefulFailover() throws Exception {
+    cluster.start(3);
+
+    cluster.waitForActiveLockHolder(0);
+
+    // Mark it become observer, wait for it to exit election
+    DummyHAService svc2 = cluster.getService(2);
+    svc2.state = HAServiceState.OBSERVER;
+    cluster.waitForHAState(2, HAServiceState.OBSERVER);
+    cluster.setFailToBecomeActive(2, true);
+    cluster.setFailToBecomeStandby(2, true);
+    cluster.setFailToBecomeObserver(2, true);
+    cluster.waitForElectorState(2, ActiveStandbyElector.State.INIT);
+
+    // Ask for failover, it should fail, because it's observer
+    try {
+      cluster.getService(2).getZKFCProxy(conf, 5000).gracefulFailover();
+      fail("Did not fail to graceful failover to observer!");
+    } catch (ServiceFailedException sfe) {
+      GenericTestUtils.assertExceptionContains(
+              cluster.getService(2).toString() +
+                      " is in observer state.", sfe);
     }
   }
 

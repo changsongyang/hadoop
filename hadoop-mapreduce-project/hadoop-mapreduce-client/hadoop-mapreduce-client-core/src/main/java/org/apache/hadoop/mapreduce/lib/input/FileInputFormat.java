@@ -19,12 +19,11 @@
 package org.apache.hadoop.mapreduce.lib.input;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.List;
 
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -45,6 +44,8 @@ import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StopWatch;
 import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.Lists;
 
@@ -76,16 +77,19 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
     "mapreduce.input.fileinputformat.numinputfiles";
   public static final String INPUT_DIR_RECURSIVE =
     "mapreduce.input.fileinputformat.input.dir.recursive";
+  public static final String INPUT_DIR_NONRECURSIVE_IGNORE_SUBDIRS =
+    "mapreduce.input.fileinputformat.input.dir.nonrecursive.ignore.subdirs";
   public static final String LIST_STATUS_NUM_THREADS =
       "mapreduce.input.fileinputformat.list-status.num-threads";
   public static final int DEFAULT_LIST_STATUS_NUM_THREADS = 1;
 
-  private static final Log LOG = LogFactory.getLog(FileInputFormat.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FileInputFormat.class);
 
   private static final double SPLIT_SLOP = 1.1;   // 10% slop
   
   @Deprecated
-  public static enum Counter { 
+  public enum Counter {
     BYTES_READ
   }
 
@@ -230,11 +234,15 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
         (PathFilter) ReflectionUtils.newInstance(filterClass, conf) : null;
   }
 
-  /** List input directories.
+  /**
+   * List input directories.
    * Subclasses may override to, e.g., select only files matching a regular
    * expression. 
-   * 
-   * @param job the job to list input paths for
+   *
+   * If security is enabled, this method collects
+   * delegation tokens from the input paths and adds them to the job's
+   * credentials.
+   * @param job the job to list input paths for and attach tokens to.
    * @return array of FileStatus objects
    * @throws IOException if zero items.
    */
@@ -276,7 +284,10 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
             job.getConfiguration(), dirs, recursive, inputFilter, true);
         locatedFiles = locatedFileStatusFetcher.getFileStatuses();
       } catch (InterruptedException e) {
-        throw new IOException("Interrupted while getting file statuses");
+        throw (IOException)
+            new InterruptedIOException(
+                "Interrupted while getting file statuses")
+                .initCause(e);
       }
       result = Lists.newArrayList(locatedFiles);
     }
@@ -391,7 +402,13 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
     // generate splits
     List<InputSplit> splits = new ArrayList<InputSplit>();
     List<FileStatus> files = listStatus(job);
+
+    boolean ignoreDirs = !getInputDirRecursive(job)
+      && job.getConfiguration().getBoolean(INPUT_DIR_NONRECURSIVE_IGNORE_SUBDIRS, false);
     for (FileStatus file: files) {
+      if (ignoreDirs && file.isDirectory()) {
+        continue;
+      }
       Path path = file.getPath();
       long length = file.getLen();
       if (length != 0) {

@@ -244,13 +244,40 @@ public class BlockInfoStriped extends BlockInfo {
     return true;
   }
 
-  static class StorageAndBlockIndex {
-    final DatanodeStorageInfo storage;
-    final byte blockIndex;
+  /**
+   * Striped blocks on Provided Storage is not supported. All blocks on
+   * Provided storage are assumed to be "contiguous".
+   */
+  @Override
+  boolean isProvided() {
+    return false;
+  }
+
+  /**
+   * This class contains datanode storage information and block index in the
+   * block group.
+   */
+  public static class StorageAndBlockIndex {
+    private final DatanodeStorageInfo storage;
+    private final byte blockIndex;
 
     StorageAndBlockIndex(DatanodeStorageInfo storage, byte blockIndex) {
       this.storage = storage;
       this.blockIndex = blockIndex;
+    }
+
+    /**
+     * @return storage in the datanode.
+     */
+    public DatanodeStorageInfo getStorage() {
+      return storage;
+    }
+
+    /**
+     * @return block index in the block group.
+     */
+    public byte getBlockIndex() {
+      return blockIndex;
     }
   }
 

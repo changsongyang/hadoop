@@ -17,10 +17,20 @@
  */
 package org.apache.hadoop.fs;
 
+import java.io.File;
+import java.io.IOException;
+import java.util.regex.Pattern;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.StatUtils;
 import org.apache.hadoop.util.Shell;
+
 import org.junit.Before;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,6 +43,20 @@ public class TestRawLocalFileSystemContract extends FileSystemContractBaseTest {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(TestRawLocalFileSystemContract.class);
+  private final static Path TEST_BASE_DIR =
+      new Path(GenericTestUtils.getRandomizedTestDir().getAbsolutePath());
+
+  // These are the string values that DF sees as "Filesystem" for a
+  // Docker container accessing a Mac or Windows host's filesystem.
+  private static final String FS_TYPE_MAC = "osxfs";
+  private static boolean looksLikeMac(String filesys) {
+    return filesys.toLowerCase().contains(FS_TYPE_MAC.toLowerCase());
+  }
+  private static final Pattern HAS_DRIVE_LETTER_SPECIFIER =
+      Pattern.compile("^/?[a-zA-Z]:");
+  private static boolean looksLikeWindows(String filesys) {
+    return HAS_DRIVE_LETTER_SPECIFIER.matcher(filesys).find();
+  }
 
   @Before
   public void setUp() throws Exception {
@@ -51,25 +75,128 @@ public class TestRawLocalFileSystemContract extends FileSystemContractBaseTest {
     return false;
   }
 
+  /**
+   * Disabling testing root operation.
+   *
+   * Writing to root directory on the local file system may get permission
+   * denied exception, or even worse, delete/overwrite files accidentally.
+   */
+  @Override
+  protected boolean rootDirTestEnabled() {
+    return false;
+  }
+
   @Override
   public String getDefaultWorkingDirectory() {
     return fs.getWorkingDirectory().toUri().getPath();
   }
 
   @Override
-  protected Path path(String pathString) {
-    // For testWorkingDirectory
-    if (pathString.equals(getDefaultWorkingDirectory()) ||
-        pathString.equals(".") || pathString.equals("..")) {
-      return super.path(pathString);
-    }
-
-    return new Path(GenericTestUtils.getTempPath(pathString)).
-        makeQualified(fs.getUri(), fs.getWorkingDirectory());
+  protected Path getTestBaseDir() {
+    return TEST_BASE_DIR;
   }
 
   @Override
   protected boolean filesystemIsCaseSensitive() {
-    return !(Shell.WINDOWS || Shell.MAC);
+    if (Shell.WINDOWS || Shell.MAC) {
+      return false;
+    }
+    // osType is linux or unix-like, but it might be in a container mounting a
+    // Mac or Windows volume. Use DF to try to determine if this is the case.
+    String rfsPathStr = "uninitialized";
+    String rfsType;
+    try {
+      RawLocalFileSystem rfs = new RawLocalFileSystem();
+      Configuration conf = new Configuration();
+      rfs.initialize(rfs.getUri(), conf);
+      rfsPathStr = Path.getPathWithoutSchemeAndAuthority(
+          rfs.getWorkingDirectory()).toString();
+      File rfsPath = new File(rfsPathStr);
+      // DF.getFilesystem() only provides indirect info about FS type, but it's
+      // the best we have.  `df -T` would be better, but isn't cross-platform.
+      rfsType = (new DF(rfsPath, conf)).getFilesystem();
+      LOG.info("DF.Filesystem is {} for path {}", rfsType, rfsPath);
+    } catch (IOException ex) {
+      LOG.error("DF failed on path {}", rfsPathStr);
+      rfsType = Shell.osType.toString();
+    }
+    return !(looksLikeMac(rfsType) || looksLikeWindows(rfsType));
   }
+
+  // cross-check getPermission using both native/non-native
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testPermission() throws Exception {
+    Path testDir = getTestBaseDir();
+    String testFilename = "teststat2File";
+    Path path = new Path(testDir, testFilename);
+
+    RawLocalFileSystem rfs = new RawLocalFileSystem();
+    Configuration conf = new Configuration();
+    rfs.initialize(rfs.getUri(), conf);
+    rfs.createNewFile(path);
+
+    File file = rfs.pathToFile(path);
+    long defaultBlockSize = rfs.getDefaultBlockSize(path);
+
+    //
+    // test initial permission
+    //
+    RawLocalFileSystem.DeprecatedRawLocalFileStatus fsNIO =
+        new RawLocalFileSystem.DeprecatedRawLocalFileStatus(
+            file, defaultBlockSize, rfs);
+    fsNIO.loadPermissionInfoByNativeIO();
+    RawLocalFileSystem.DeprecatedRawLocalFileStatus fsnonNIO =
+        new RawLocalFileSystem.DeprecatedRawLocalFileStatus(
+            file, defaultBlockSize, rfs);
+    fsnonNIO.loadPermissionInfoByNonNativeIO();
+
+    assertEquals(fsNIO.getOwner(), fsnonNIO.getOwner());
+    assertEquals(fsNIO.getGroup(), fsnonNIO.getGroup());
+    assertEquals(fsNIO.getPermission(), fsnonNIO.getPermission());
+
+    LOG.info("owner: {}, group: {}, permission: {}, isSticky: {}",
+        fsNIO.getOwner(), fsNIO.getGroup(), fsNIO.getPermission(),
+        fsNIO.getPermission().getStickyBit());
+
+    //
+    // test normal chmod - no sticky bit
+    //
+    StatUtils.setPermissionFromProcess("644", file.getPath());
+    fsNIO.loadPermissionInfoByNativeIO();
+    fsnonNIO.loadPermissionInfoByNonNativeIO();
+    assertEquals(fsNIO.getPermission(), fsnonNIO.getPermission());
+    assertEquals(644, fsNIO.getPermission().toOctal());
+    assertFalse(fsNIO.getPermission().getStickyBit());
+    assertFalse(fsnonNIO.getPermission().getStickyBit());
+
+    //
+    // test sticky bit
+    // unfortunately, cannot be done in Windows environments
+    //
+    if (!Shell.WINDOWS) {
+      //
+      // add sticky bit
+      //
+      StatUtils.setPermissionFromProcess("1644", file.getPath());
+      fsNIO.loadPermissionInfoByNativeIO();
+      fsnonNIO.loadPermissionInfoByNonNativeIO();
+      assertEquals(fsNIO.getPermission(), fsnonNIO.getPermission());
+      assertEquals(1644, fsNIO.getPermission().toOctal());
+      assertEquals(true, fsNIO.getPermission().getStickyBit());
+      assertEquals(true, fsnonNIO.getPermission().getStickyBit());
+
+      //
+      // remove sticky bit
+      //
+      StatUtils.setPermissionFromProcess("-t", file.getPath());
+      fsNIO.loadPermissionInfoByNativeIO();
+      fsnonNIO.loadPermissionInfoByNonNativeIO();
+      assertEquals(fsNIO.getPermission(), fsnonNIO.getPermission());
+      assertEquals(644, fsNIO.getPermission().toOctal());
+      assertEquals(false, fsNIO.getPermission().getStickyBit());
+      assertEquals(false, fsnonNIO.getPermission().getStickyBit());
+    }
+  }
+
 }

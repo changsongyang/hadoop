@@ -24,22 +24,25 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 
+import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -47,12 +50,18 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch.ShellScriptBuilder;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.NodeManagerHardwareUtils;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerExecContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReapContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.DeletionAsUserContext;
@@ -61,13 +70,18 @@ import org.apache.hadoop.yarn.server.nodemanager.util.ProcessIdFileReader;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
 
+import static org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch.CONTAINER_PRE_LAUNCH_STDERR;
+import static org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch.CONTAINER_PRE_LAUNCH_STDOUT;
+
 /**
  * This class is abstraction of the mechanism used to launch a container on the
  * underlying OS.  All executor implementations must extend ContainerExecutor.
  */
 public abstract class ContainerExecutor implements Configurable {
-  private static final Log LOG = LogFactory.getLog(ContainerExecutor.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(ContainerExecutor.class);
   protected static final String WILDCARD = "*";
+  public static final String TOKEN_FILE_NAME_FMT = "%s.tokens";
 
   /**
    * The permissions to use when creating the launch script.
@@ -78,7 +92,7 @@ public abstract class ContainerExecutor implements Configurable {
   /**
    * The relative path to which debug information will be written.
    *
-   * @see ContainerLaunch.ShellScriptBuilder#listDebugInformation
+   * @see ShellScriptBuilder#listDebugInformation
    */
   public static final String DIRECTORY_CONTENTS = "directory.info";
 
@@ -88,10 +102,15 @@ public abstract class ContainerExecutor implements Configurable {
   private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
   private final ReadLock readLock = lock.readLock();
   private final WriteLock writeLock = lock.writeLock();
+  private String[] whitelistVars;
 
   @Override
   public void setConf(Configuration conf) {
     this.conf = conf;
+    if (conf != null) {
+      whitelistVars = conf.get(YarnConfiguration.NM_ENV_WHITELIST,
+          YarnConfiguration.DEFAULT_NM_ENV_WHITELIST).split(",");
+    }
   }
 
   @Override
@@ -103,9 +122,10 @@ public abstract class ContainerExecutor implements Configurable {
    * Run the executor initialization steps.
    * Verify that the necessary configs and permissions are in place.
    *
+   * @param nmContext Context of NM
    * @throws IOException if initialization fails
    */
-  public abstract void init() throws IOException;
+  public abstract void init(Context nmContext) throws IOException;
 
   /**
    * This function localizes the JAR file on-demand.
@@ -148,6 +168,14 @@ public abstract class ContainerExecutor implements Configurable {
   public abstract void startLocalizer(LocalizerStartContext ctx)
     throws IOException, InterruptedException;
 
+  /**
+   * Prepare the container prior to the launch environment being written.
+   * @param ctx Encapsulates information necessary for launching containers.
+   * @throws IOException if errors occur during container preparation
+   */
+  public void prepareContainer(ContainerPrepareContext ctx) throws
+      IOException{
+  }
 
   /**
    * Launch the container on the node. This is a blocking call and returns only
@@ -155,9 +183,21 @@ public abstract class ContainerExecutor implements Configurable {
    * @param ctx Encapsulates information necessary for launching containers.
    * @return the return status of the launch
    * @throws IOException if the container launch fails
+   * @throws ConfigurationException if config error was found
    */
   public abstract int launchContainer(ContainerStartContext ctx) throws
-      IOException;
+      IOException, ConfigurationException;
+
+  /**
+   * Relaunch the container on the node. This is a blocking call and returns
+   * only when the container exits.
+   * @param ctx Encapsulates information necessary for relaunching containers.
+   * @return the return status of the relaunch
+   * @throws IOException if the container relaunch fails
+   * @throws ConfigurationException if config error was found
+   */
+  public abstract int relaunchContainer(ContainerStartContext ctx) throws
+      IOException, ConfigurationException;
 
   /**
    * Signal container with the specified signal.
@@ -168,6 +208,26 @@ public abstract class ContainerExecutor implements Configurable {
    */
   public abstract boolean signalContainer(ContainerSignalContext ctx)
       throws IOException;
+
+  /**
+   * Perform the steps necessary to reap the container.
+   *
+   * @param ctx Encapsulates information necessary for reaping containers.
+   * @return returns true if the operation succeeded.
+   * @throws IOException if reaping the container fails.
+   */
+  public abstract boolean reapContainer(ContainerReapContext ctx)
+      throws IOException;
+
+  /**
+   * Perform interactive docker command into running container.
+   *
+   * @param ctx Encapsulates information necessary for exec containers.
+   * @return return input/output stream if the operation succeeded.
+   * @throws ContainerExecutionException if container exec fails.
+   */
+  public abstract IOStreamPair execContainer(ContainerExecContext ctx)
+      throws ContainerExecutionException;
 
   /**
    * Delete specified directories as a given user.
@@ -200,6 +260,18 @@ public abstract class ContainerExecutor implements Configurable {
       throws IOException;
 
   /**
+   * Update cluster information inside container.
+   *
+   * @param ctx ContainerRuntimeContext
+   * @param user Owner of application
+   * @param appId YARN application ID
+   * @param spec Service Specification
+   * @throws IOException if there is a failure while writing spec to disk
+   */
+  public abstract void updateYarnSysFS(Context ctx, String user,
+      String appId, String spec) throws IOException;
+
+  /**
    * Recover an already existing container. This is a blocking call and returns
    * only when the container exits.  Note that the container must have been
    * activated prior to this call.
@@ -218,7 +290,7 @@ public abstract class ContainerExecutor implements Configurable {
     Path pidPath = getPidFilePath(containerId);
 
     if (pidPath == null) {
-      LOG.warn(containerId + " is not active, returning terminated error");
+      LOG.warn("{} is not active, returning terminated error", containerId);
 
       return ExitCode.TERMINATED.getExitCode();
     }
@@ -229,7 +301,7 @@ public abstract class ContainerExecutor implements Configurable {
       throw new IOException("Unable to determine pid for " + containerId);
     }
 
-    LOG.info("Reacquiring " + containerId + " with pid " + pid);
+    LOG.info("Reacquiring {} with pid {}", containerId, pid);
 
     ContainerLivenessContext livenessContext = new ContainerLivenessContext
         .Builder()
@@ -250,7 +322,7 @@ public abstract class ContainerExecutor implements Configurable {
 
     while (!file.exists() && msecLeft >= 0) {
       if (!isContainerActive(containerId)) {
-        LOG.info(containerId + " was deactivated");
+        LOG.info("{} was deactivated", containerId);
 
         return ExitCode.TERMINATED.getExitCode();
       }
@@ -266,7 +338,8 @@ public abstract class ContainerExecutor implements Configurable {
     }
 
     try {
-      return Integer.parseInt(FileUtils.readFileToString(file).trim());
+      return Integer.parseInt(
+          FileUtils.readFileToString(file, Charset.defaultCharset()).trim());
     } catch (NumberFormatException e) {
       throw new IOException("Error parsing exit code from pid " + pid, e);
     }
@@ -285,14 +358,15 @@ public abstract class ContainerExecutor implements Configurable {
    * @param command the command that will be run
    * @param logDir the log dir to which to copy debugging information
    * @param user the username of the job owner
+   * @param nmVars the set of environment vars that are explicitly set by NM
    * @throws IOException if any errors happened writing to the OutputStream,
    * while creating symlinks
    */
   public void writeLaunchEnv(OutputStream out, Map<String, String> environment,
       Map<Path, List<String>> resources, List<String> command, Path logDir,
-      String user) throws IOException {
+      String user, LinkedHashSet<String> nmVars) throws IOException {
     this.writeLaunchEnv(out, environment, resources, command, logDir, user,
-        ContainerLaunch.CONTAINER_SCRIPT);
+        ContainerLaunch.CONTAINER_SCRIPT, nmVars);
   }
 
   /**
@@ -308,48 +382,62 @@ public abstract class ContainerExecutor implements Configurable {
    * @param logDir the log dir to which to copy debugging information
    * @param user the username of the job owner
    * @param outFilename the path to which to write the launch environment
+   * @param nmVars the set of environment vars that are explicitly set by NM
    * @throws IOException if any errors happened writing to the OutputStream,
    * while creating symlinks
    */
   @VisibleForTesting
   public void writeLaunchEnv(OutputStream out, Map<String, String> environment,
       Map<Path, List<String>> resources, List<String> command, Path logDir,
-      String user, String outFilename) throws IOException {
+      String user, String outFilename, LinkedHashSet<String> nmVars)
+      throws IOException {
+
     ContainerLaunch.ShellScriptBuilder sb =
         ContainerLaunch.ShellScriptBuilder.create();
-    Set<String> whitelist = new HashSet<>();
 
-    String[] nmWhiteList = conf.get(YarnConfiguration.NM_ENV_WHITELIST,
-        YarnConfiguration.DEFAULT_NM_ENV_WHITELIST).split(",");
-    for (String param : nmWhiteList) {
-      whitelist.add(param);
-    }
+    // Add "set -o pipefail -e" to validate launch_container script.
+    sb.setExitOnFailure();
+
+    //Redirect stdout and stderr for launch_container script
+    sb.stdout(logDir, CONTAINER_PRE_LAUNCH_STDOUT);
+    sb.stderr(logDir, CONTAINER_PRE_LAUNCH_STDERR);
+
 
     if (environment != null) {
-      for (Map.Entry<String, String> env : environment.entrySet()) {
-        if (!whitelist.contains(env.getKey())) {
+      sb.echo("Setting up env variables");
+      // Whitelist environment variables are treated specially.
+      // Only add them if they are not already defined in the environment.
+      // Add them using special syntax to prevent them from eclipsing
+      // variables that may be set explicitly in the container image (e.g,
+      // in a docker image).  Put these before the others to ensure the
+      // correct expansion is used.
+      for(String var : whitelistVars) {
+        if (!environment.containsKey(var)) {
+          String val = getNMEnvVar(var);
+          if (val != null) {
+            sb.whitelistedEnv(var, val);
+          }
+        }
+      }
+      // Now write vars that were set explicitly by nodemanager, preserving
+      // the order they were written in.
+      for (String nmEnvVar : nmVars) {
+        sb.env(nmEnvVar, environment.get(nmEnvVar));
+      }
+      // Now write the remaining environment variables.
+      for (Map.Entry<String, String> env :
+           sb.orderEnvByDependencies(environment).entrySet()) {
+        if (!nmVars.contains(env.getKey())) {
           sb.env(env.getKey(), env.getValue());
-        } else {
-          sb.whitelistedEnv(env.getKey(), env.getValue());
         }
       }
     }
 
     if (resources != null) {
-      for (Map.Entry<Path, List<String>> resourceEntry :
-          resources.entrySet()) {
-        for (String linkName : resourceEntry.getValue()) {
-          if (new Path(linkName).getName().equals(WILDCARD)) {
-            // If this is a wildcarded path, link to everything in the
-            // directory from the working directory
-            for (File wildLink : readDirAsUser(user, resourceEntry.getKey())) {
-              sb.symlink(new Path(wildLink.toString()),
-                  new Path(wildLink.getName()));
-            }
-          } else {
-            sb.symlink(resourceEntry.getKey(), new Path(linkName));
-          }
-        }
+      sb.echo("Setting up job resources");
+      Map<Path, Path> symLinks = resolveSymLinks(resources, user);
+      for (Map.Entry<Path, Path> symLink : symLinks.entrySet()) {
+        sb.symlink(symLink.getKey(), symLink.getValue());
       }
     }
 
@@ -357,15 +445,15 @@ public abstract class ContainerExecutor implements Configurable {
     if (getConf() != null &&
         getConf().getBoolean(YarnConfiguration.NM_LOG_CONTAINER_DEBUG_INFO,
         YarnConfiguration.DEFAULT_NM_LOG_CONTAINER_DEBUG_INFO)) {
+      sb.echo("Copying debugging information");
       sb.copyDebugInformation(new Path(outFilename),
           new Path(logDir, outFilename));
       sb.listDebugInformation(new Path(logDir, DIRECTORY_CONTENTS));
     }
-
+    sb.echo("Launching container");
     sb.command(command);
 
     PrintStream pout = null;
-
     try {
       pout = new PrintStream(out, false, "UTF-8");
       sb.write(pout);
@@ -471,8 +559,8 @@ public abstract class ContainerExecutor implements Configurable {
    * @return the path of the pid-file for the given containerId.
    */
   protected Path getPidFilePath(ContainerId containerId) {
+    readLock.lock();
     try {
-      readLock.lock();
       return (this.pidFiles.get(containerId));
     } finally {
       readLock.unlock();
@@ -622,13 +710,17 @@ public abstract class ContainerExecutor implements Configurable {
    * @return true if the container is active
    */
   protected boolean isContainerActive(ContainerId containerId) {
+    readLock.lock();
     try {
-      readLock.lock();
-
       return (this.pidFiles.containsKey(containerId));
     } finally {
       readLock.unlock();
     }
+  }
+
+  @VisibleForTesting
+  protected String getNMEnvVar(String varname) {
+    return System.getenv(varname);
   }
 
   /**
@@ -639,8 +731,8 @@ public abstract class ContainerExecutor implements Configurable {
    * of the launched process
    */
   public void activateContainer(ContainerId containerId, Path pidFilePath) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       this.pidFiles.put(containerId, pidFilePath);
     } finally {
       writeLock.unlock();
@@ -648,7 +740,8 @@ public abstract class ContainerExecutor implements Configurable {
   }
 
   // LinuxContainerExecutor overrides this method and behaves differently.
-  public String[] getIpAndHost(Container container) {
+  public String[] getIpAndHost(Container container)
+      throws ContainerExecutionException {
     return getLocalIpAndHost(container);
   }
 
@@ -661,7 +754,7 @@ public abstract class ContainerExecutor implements Configurable {
       ipAndHost[0] = address.getHostAddress();
       ipAndHost[1] = address.getHostName();
     } catch (UnknownHostException e) {
-      LOG.error("Unable to get Local hostname and ip for " + container
+      LOG.error("Unable to get Local hostname and ip for {}", container
           .getContainerId(), e);
     }
     return ipAndHost;
@@ -674,11 +767,55 @@ public abstract class ContainerExecutor implements Configurable {
    * @param containerId the container ID
    */
   public void deactivateContainer(ContainerId containerId) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       this.pidFiles.remove(containerId);
     } finally {
       writeLock.unlock();
+    }
+  }
+
+  /**
+   * Pause the container. The default implementation is to raise a kill event.
+   * Specific executor implementations can override this behavior.
+   * @param container
+   *          the Container
+   */
+  public void pauseContainer(Container container) {
+    LOG.warn("{} doesn't support pausing.", container.getContainerId());
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Resume the container from pause state. The default implementation ignores
+   * this event. Specific implementations can override this behavior.
+   * @param container
+   *          the Container
+   */
+  public void resumeContainer(Container container) {
+    LOG.warn("{} doesn't support resume.", container.getContainerId());
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Perform any cleanup before the next launch of the container.
+   * @param container         container
+   */
+  public void cleanupBeforeRelaunch(Container container)
+      throws IOException, InterruptedException {
+    if (container.getLocalizedResources() != null) {
+
+      Map<Path, Path> symLinks = resolveSymLinks(
+          container.getLocalizedResources(), container.getUser());
+
+      for (Map.Entry<Path, Path> symLink : symLinks.entrySet()) {
+        LOG.debug("{} deleting {}", container.getContainerId(),
+            symLink.getValue());
+        deleteAsUser(new DeletionAsUserContext.Builder()
+            .setUser(container.getUser())
+            .setSubDir(symLink.getValue())
+            .build());
+      }
     }
   }
 
@@ -698,7 +835,7 @@ public abstract class ContainerExecutor implements Configurable {
       try {
         pid = ProcessIdFileReader.getProcessId(pidFile);
       } catch (IOException e) {
-        LOG.error("Got exception reading pid from pid-file " + pidFile, e);
+        LOG.error("Got exception reading pid from pid-file {}", pidFile, e);
       }
     }
 
@@ -760,5 +897,31 @@ public abstract class ContainerExecutor implements Configurable {
             container.getContainerId(), message));
       }
     }
+  }
+
+  private Map<Path, Path> resolveSymLinks(Map<Path,
+      List<String>> resources, String user) {
+    Map<Path, Path> symLinks = new HashMap<>();
+    for (Map.Entry<Path, List<String>> resourceEntry :
+        resources.entrySet()) {
+      for (String linkName : resourceEntry.getValue()) {
+        if (new Path(linkName).getName().equals(WILDCARD)) {
+          // If this is a wildcarded path, link to everything in the
+          // directory from the working directory
+          for (File wildLink : readDirAsUser(user, resourceEntry.getKey())) {
+            symLinks.put(new Path(wildLink.toString()),
+                new Path(wildLink.getName()));
+          }
+        } else {
+          symLinks.put(resourceEntry.getKey(), new Path(linkName));
+        }
+      }
+    }
+    return symLinks;
+  }
+
+  public String getExposedPorts(Container container)
+      throws ContainerExecutionException {
+    return null;
   }
 }

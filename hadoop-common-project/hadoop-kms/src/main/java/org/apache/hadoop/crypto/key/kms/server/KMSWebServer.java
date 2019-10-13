@@ -27,10 +27,18 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.ConfigurationWithLogging;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.metrics2.source.JvmMetrics;
+import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.ssl.SSLFactory;
+import org.apache.hadoop.util.JvmPauseMonitor;
 import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.crypto.key.kms.server.KMSConfiguration.METRICS_PROCESS_NAME_DEFAULT;
+import static org.apache.hadoop.crypto.key.kms.server.KMSConfiguration.METRICS_PROCESS_NAME_KEY;
+import static org.apache.hadoop.crypto.key.kms.server.KMSConfiguration.METRICS_SESSION_ID_KEY;
 
 /**
  * The KMS web server.
@@ -45,14 +53,11 @@ public class KMSWebServer {
 
   private final HttpServer2 httpServer;
   private final String scheme;
+  private final String processName;
+  private final String sessionId;
+  private final JvmPauseMonitor pauseMonitor;
 
-  KMSWebServer(Configuration cnf) throws Exception {
-    ConfigurationWithLogging conf = new ConfigurationWithLogging(cnf);
-
-    // Add SSL configuration file
-    conf.addResource(conf.get(SSLFactory.SSL_SERVER_CONF_KEY,
-        SSLFactory.SSL_SERVER_CONF_DEFAULT));
-
+  KMSWebServer(Configuration conf, Configuration sslConf) throws Exception {
     // Override configuration with deprecated environment variables.
     deprecateEnv("KMS_TEMP", conf, HttpServer2.HTTP_TEMP_DIR_KEY,
         KMSConfiguration.KMS_SITE_XML);
@@ -68,16 +73,21 @@ public class KMSWebServer {
         KMSConfiguration.KMS_SITE_XML);
     deprecateEnv("KMS_SSL_ENABLED", conf,
         KMSConfiguration.SSL_ENABLED_KEY, KMSConfiguration.KMS_SITE_XML);
-    deprecateEnv("KMS_SSL_KEYSTORE_FILE", conf,
+    deprecateEnv("KMS_SSL_KEYSTORE_FILE", sslConf,
         SSLFactory.SSL_SERVER_KEYSTORE_LOCATION,
         SSLFactory.SSL_SERVER_CONF_DEFAULT);
-    deprecateEnv("KMS_SSL_KEYSTORE_PASS", conf,
+    deprecateEnv("KMS_SSL_KEYSTORE_PASS", sslConf,
         SSLFactory.SSL_SERVER_KEYSTORE_PASSWORD,
         SSLFactory.SSL_SERVER_CONF_DEFAULT);
 
     boolean sslEnabled = conf.getBoolean(KMSConfiguration.SSL_ENABLED_KEY,
         KMSConfiguration.SSL_ENABLED_DEFAULT);
     scheme = sslEnabled ? HttpServer2.HTTPS_SCHEME : HttpServer2.HTTP_SCHEME;
+    processName =
+        conf.get(METRICS_PROCESS_NAME_KEY, METRICS_PROCESS_NAME_DEFAULT);
+    sessionId = conf.get(METRICS_SESSION_ID_KEY);
+    pauseMonitor = new JvmPauseMonitor();
+    pauseMonitor.init(conf);
 
     String host = conf.get(KMSConfiguration.HTTP_HOST_KEY,
         KMSConfiguration.HTTP_HOST_DEFAULT);
@@ -88,8 +98,10 @@ public class KMSWebServer {
     httpServer = new HttpServer2.Builder()
         .setName(NAME)
         .setConf(conf)
-        .setSSLConf(conf)
+        .setSSLConf(sslConf)
         .authFilterConfigurationPrefix(KMSAuthenticationFilter.CONFIG_PREFIX)
+        .setACL(new AccessControlList(conf.get(
+            KMSConfiguration.HTTP_ADMINS_KEY, " ")))
         .addEndpoint(endpoint)
         .build();
   }
@@ -108,15 +120,19 @@ public class KMSWebServer {
     if (value == null) {
       return;
     }
-    String propValue = conf.get(propName);
-    LOG.warn("Environment variable {} = '{}' is deprecated and overriding"
-        + " property {} = '{}', please set the property in {} instead.",
-        varName, value, propName, propValue, confFile);
+    LOG.warn("Environment variable {} is deprecated and overriding"
+        + " property {}, please set the property in {} instead.",
+        varName, propName, confFile);
     conf.set(propName, value, "environment variable " + varName);
   }
 
   public void start() throws IOException {
     httpServer.start();
+
+    DefaultMetricsSystem.initialize(processName);
+    final JvmMetrics jm = JvmMetrics.initSingleton(processName, sessionId);
+    jm.setPauseMonitor(pauseMonitor);
+    pauseMonitor.start();
   }
 
   public boolean isRunning() {
@@ -129,6 +145,10 @@ public class KMSWebServer {
 
   public void stop() throws Exception {
     httpServer.stop();
+
+    pauseMonitor.stop();
+    JvmMetrics.shutdownSingleton();
+    DefaultMetricsSystem.shutdown();
   }
 
   public URL getKMSUrl() {
@@ -146,9 +166,13 @@ public class KMSWebServer {
   }
 
   public static void main(String[] args) throws Exception {
+    KMSConfiguration.initLogging();
     StringUtils.startupShutdownMessage(KMSWebServer.class, args, LOG);
-    Configuration conf = KMSConfiguration.getKMSConf();
-    KMSWebServer kmsWebServer = new KMSWebServer(conf);
+    Configuration conf = new ConfigurationWithLogging(
+        KMSConfiguration.getKMSConf());
+    Configuration sslConf = new ConfigurationWithLogging(
+        SSLFactory.readSSLConfiguration(conf, SSLFactory.Mode.SERVER));
+    KMSWebServer kmsWebServer = new KMSWebServer(conf, sslConf);
     kmsWebServer.start();
     kmsWebServer.join();
   }

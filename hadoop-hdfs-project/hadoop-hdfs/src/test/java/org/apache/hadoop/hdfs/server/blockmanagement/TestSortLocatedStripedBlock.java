@@ -27,6 +27,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.StripedFileTestUtil;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
@@ -34,7 +35,6 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
-import org.apache.hadoop.hdfs.server.namenode.ErasureCodingPolicyManager;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Time;
@@ -54,7 +54,7 @@ public class TestSortLocatedStripedBlock {
       .getLogger(TestSortLocatedStripedBlock.class);
 
   private final ErasureCodingPolicy ecPolicy =
-      ErasureCodingPolicyManager.getSystemDefaultPolicy();
+      StripedFileTestUtil.getDefaultECPolicy();
   private final int cellSize = ecPolicy.getCellSize();
   private final short dataBlocks = (short) ecPolicy.getNumDataUnits();
   private final short parityBlocks = (short) ecPolicy.getNumParityUnits();
@@ -452,7 +452,7 @@ public class TestSortLocatedStripedBlock {
         locs[index].setDecommissioned();
         decommNodeInfo.add(locs[index].toString());
         // Removing it from the list to ensure that all the given nodes are
-        // successfully marked as decomissioned.
+        // successfully marked as decommissioned.
         decommnNodeIndices.remove(new Integer(index));
       }
     }
@@ -471,7 +471,7 @@ public class TestSortLocatedStripedBlock {
         locs[j].setDecommissioned();
         decommNodeInfo.add(locs[j].toString());
         // Removing it from the list to ensure that all the given nodes are
-        // successfully marked as decomissioned.
+        // successfully marked as decommissioned.
         decommnNodeIndices.remove(new Integer(index));
       }
     }
@@ -493,7 +493,7 @@ public class TestSortLocatedStripedBlock {
         locs[index].setDecommissioned();
         decommNodeInfo.add(locs[index].toString());
         // Removing it from the list to ensure that all the given nodes are
-        // successfully marked as decomissioned.
+        // successfully marked as decommissioned.
         decommnNodeIndices.remove(new Integer(blkIndexPos));
       }
     }

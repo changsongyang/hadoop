@@ -34,8 +34,8 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryProxy;
@@ -49,14 +49,14 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
  * underlying proxies simultaneously. Each proxy inside the wrapper proxy will
  * retry the corresponding target. It assumes the in an HA setup, there will be
  * only one Active, and the active should respond faster than any configured
- * standbys. Once it receives a response from any one of the configred proxies,
+ * standbys. Once it receives a response from any one of the configured proxies,
  * outstanding requests to other proxies are immediately cancelled.
  */
 public class RequestHedgingRMFailoverProxyProvider<T>
     extends ConfiguredRMFailoverProxyProvider<T> {
 
-  private static final Log LOG =
-      LogFactory.getLog(RequestHedgingRMFailoverProxyProvider.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(RequestHedgingRMFailoverProxyProvider.class);
 
   private volatile String successfulProxy = null;
   private ProxyInfo<T> wrappedProxy = null;
@@ -95,7 +95,7 @@ public class RequestHedgingRMFailoverProxyProvider<T>
       // Create proxy that can retry exceptions properly.
       RetryPolicy retryPolicy = RMProxy.createRetryPolicy(conf, false);
       InetSocketAddress rmAddress = rmProxy.getRMAddress(conf, protocol);
-      T proxy = RMProxy.<T> getProxy(conf, protocol, rmAddress);
+      T proxy = rmProxy.getProxy(conf, protocol, rmAddress);
       return (T) RetryProxy.create(protocol, proxy, retryPolicy);
     } catch (IOException ioe) {
       LOG.error("Unable to create proxy to the ResourceManager "
@@ -144,6 +144,8 @@ public class RequestHedgingRMFailoverProxyProvider<T>
             args);
       }
 
+      LOG.info("Looking for the active RM in " + Arrays.toString(rmServiceIds)
+          + "...");
       ExecutorService executor = null;
       CompletionService<Object> completionService;
       try {
@@ -166,7 +168,7 @@ public class RequestHedgingRMFailoverProxyProvider<T>
         Object retVal;
         try {
           retVal = callResultFuture.get();
-          LOG.info("Invocation successful on [" + pInfo + "]");
+          LOG.info("Found active RM [" + pInfo + "]");
           return retVal;
         } catch (Exception ex) {
           // Throw exception from first responding RM so that clients can handle
@@ -192,7 +194,7 @@ public class RequestHedgingRMFailoverProxyProvider<T>
 
   @Override
   public void performFailover(T currentProxy) {
-    LOG.info("Connection lost, trying to fail over.");
+    LOG.info("Connection lost with " + successfulProxy + ", trying to fail over.");
     successfulProxy = null;
   }
 }

@@ -22,6 +22,8 @@ import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HA_NAMENODES_KEY_PREFIX;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_INTERNAL_NAMESERVICES_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_BACKUP_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HTTP_POLICY_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT;
@@ -54,6 +56,7 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
@@ -69,6 +72,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider;
+import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.alias.CredentialProvider;
@@ -83,9 +87,11 @@ import com.google.common.collect.Sets;
 
 public class TestDFSUtil {
 
-  static final String NS1_NN_ADDR    = "ns1-nn.example.com:9820";
-  static final String NS1_NN1_ADDR   = "ns1-nn1.example.com:9820";
-  static final String NS1_NN2_ADDR   = "ns1-nn2.example.com:9820";
+  static final String NS1_NN_ADDR    = "ns1-nn.example.com:8020";
+  static final String NS1_NN1_ADDR   = "ns1-nn1.example.com:8020";
+  static final String NS1_NN2_ADDR   = "ns1-nn2.example.com:8020";
+  static final String NS1_NN1_HTTPS_ADDR   = "ns1-nn1.example.com:50740";
+  static final String NS1_NN1_HTTP_ADDR    = "ns1-nn1.example.com:50070";
 
   /**
    * Reset to default UGI settings since some tests change them.
@@ -465,6 +471,32 @@ public class TestDFSUtil {
   }
 
   @Test
+  public void testGetNamenodeWebAddr() {
+    HdfsConfiguration conf = new HdfsConfiguration();
+
+    conf.set(DFSUtil.addKeySuffixes(
+        DFS_NAMENODE_HTTPS_ADDRESS_KEY, "ns1", "nn1"), NS1_NN1_HTTPS_ADDR);
+    conf.set(DFSUtil.addKeySuffixes(
+        DFS_NAMENODE_HTTP_ADDRESS_KEY, "ns1", "nn1"), NS1_NN1_HTTP_ADDR);
+
+    conf.set(DFS_HTTP_POLICY_KEY, HttpConfig.Policy.HTTPS_ONLY.name());
+    String httpsOnlyWebAddr = DFSUtil.getNamenodeWebAddr(
+        conf, "ns1", "nn1");
+    assertEquals(NS1_NN1_HTTPS_ADDR, httpsOnlyWebAddr);
+
+    conf.set(DFS_HTTP_POLICY_KEY, HttpConfig.Policy.HTTP_ONLY.name());
+    String httpOnlyWebAddr = DFSUtil.getNamenodeWebAddr(
+        conf, "ns1", "nn1");
+    assertEquals(NS1_NN1_HTTP_ADDR, httpOnlyWebAddr);
+
+    conf.set(DFS_HTTP_POLICY_KEY, HttpConfig.Policy.HTTP_AND_HTTPS.name());
+    String httpAndHttpsWebAddr = DFSUtil.getNamenodeWebAddr(
+        conf, "ns1", "nn1");
+    assertEquals(NS1_NN1_HTTP_ADDR, httpAndHttpsWebAddr);
+
+  }
+
+  @Test
   public void testGetInfoServer() throws IOException, URISyntaxException {
     HdfsConfiguration conf = new HdfsConfiguration();
     
@@ -477,7 +509,7 @@ public class TestDFSUtil {
         DFS_NAMENODE_HTTP_PORT_DEFAULT, null, null, null), httpport);
 
     URI httpAddress = DFSUtil.getInfoServer(new InetSocketAddress(
-        "localhost", 9820), conf, "http");
+        "localhost", 8020), conf, "http");
     assertEquals(
         URI.create("http://localhost:" + DFS_NAMENODE_HTTP_PORT_DEFAULT),
         httpAddress);
@@ -487,10 +519,10 @@ public class TestDFSUtil {
   public void testHANameNodesWithFederation() throws URISyntaxException {
     HdfsConfiguration conf = new HdfsConfiguration();
     
-    final String NS1_NN1_HOST = "ns1-nn1.example.com:9820";
-    final String NS1_NN2_HOST = "ns1-nn2.example.com:9820";
-    final String NS2_NN1_HOST = "ns2-nn1.example.com:9820";
-    final String NS2_NN2_HOST = "ns2-nn2.example.com:9820";
+    final String NS1_NN1_HOST = "ns1-nn1.example.com:8020";
+    final String NS1_NN2_HOST = "ns1-nn2.example.com:8020";
+    final String NS2_NN1_HOST = "ns2-nn1.example.com:8020";
+    final String NS2_NN2_HOST = "ns2-nn2.example.com:8020";
     conf.set(CommonConfigurationKeys.FS_DEFAULT_NAME_KEY, "hdfs://ns1");
     
     // Two nameservices, each with two NNs.
@@ -513,7 +545,7 @@ public class TestDFSUtil {
         NS2_NN2_HOST);
     
     Map<String, Map<String, InetSocketAddress>> map =
-      DFSUtil.getHaNnRpcAddresses(conf);
+        DFSUtilClient.getHaNnRpcAddresses(conf);
 
     assertTrue(HAUtil.isHAEnabled(conf, "ns1"));
     assertTrue(HAUtil.isHAEnabled(conf, "ns2"));
@@ -554,9 +586,9 @@ public class TestDFSUtil {
     HdfsConfiguration conf = new HdfsConfiguration();
     
     // One nameservice with two NNs
-    final String NS1_NN1_HOST = "ns1-nn1.example.com:9820";
+    final String NS1_NN1_HOST = "ns1-nn1.example.com:8020";
     final String NS1_NN1_HOST_SVC = "ns1-nn2.example.com:9821";
-    final String NS1_NN2_HOST = "ns1-nn1.example.com:9820";
+    final String NS1_NN2_HOST = "ns1-nn1.example.com:8020";
     final String NS1_NN2_HOST_SVC = "ns1-nn2.example.com:9821";
    
     conf.set(DFS_NAMESERVICES, "ns1");
@@ -640,10 +672,10 @@ public class TestDFSUtil {
   public void testGetNNUris() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration();
 
-    final String NS2_NN_ADDR    = "ns2-nn.example.com:9820";
-    final String NN1_ADDR       = "nn.example.com:9820";
+    final String NS2_NN_ADDR    = "ns2-nn.example.com:8020";
+    final String NN1_ADDR       = "nn.example.com:8020";
     final String NN1_SRVC_ADDR  = "nn.example.com:9821";
-    final String NN2_ADDR       = "nn2.example.com:9820";
+    final String NN2_ADDR       = "nn2.example.com:8020";
 
     conf.set(DFS_NAMESERVICES, "ns1");
     conf.set(DFSUtil.addKeySuffixes(
@@ -821,7 +853,7 @@ public class TestDFSUtil {
     // Make sure when config FS_DEFAULT_NAME_KEY using IP address,
     // it will automatically convert it to hostname
     HdfsConfiguration conf = new HdfsConfiguration();
-    conf.set(CommonConfigurationKeys.FS_DEFAULT_NAME_KEY, "hdfs://127.0.0.1:9820");
+    conf.set(CommonConfigurationKeys.FS_DEFAULT_NAME_KEY, "hdfs://127.0.0.1:8020");
     Collection<URI> uris = getInternalNameServiceUris(conf);
     assertEquals(1, uris.size());
     for (URI uri : uris) {
@@ -860,7 +892,7 @@ public class TestDFSUtil {
         DFSUtil.getSpnegoKeytabKey(conf, defaultKey));
   }
 
-  @Test(timeout=1000)
+  @Test(timeout=10000)
   public void testDurationToString() throws Exception {
     assertEquals("000:00:00:00.000", DFSUtil.durationToString(0));
     assertEquals("001:01:01:01.000",
@@ -1049,4 +1081,19 @@ public class TestDFSUtil {
         DFSUtilClient.isHDFSEncryptionEnabled(conf));
 
   }
+
+  @Test
+  public void testFileIdPath() throws Throwable {
+    // /.reserved/.inodes/
+    String prefix = Path.SEPARATOR + HdfsConstants.DOT_RESERVED_STRING +
+                    Path.SEPARATOR + HdfsConstants.DOT_INODES_STRING +
+                    Path.SEPARATOR;
+    Random r = new Random();
+    for (int i = 0; i < 100; ++i) {
+      long inode = r.nextLong() & Long.MAX_VALUE;
+      assertEquals(new Path(prefix + inode),
+          DFSUtilClient.makePathFromFileId(inode));
+    }
+  }
+
 }
